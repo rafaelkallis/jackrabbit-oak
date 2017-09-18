@@ -81,7 +81,7 @@ public class ContentMirrorStoreStrategy implements IndexStoreStrategy {
      */
     public static final int TRAVERSING_WARN = Integer.getInteger("oak.traversing.warn", 10000);
 
-    private final String indexName;
+    protected final String indexName;
 
     public ContentMirrorStoreStrategy() {
         this(INDEX_CONTENT_NODE_NAME);
@@ -105,7 +105,7 @@ public class ContentMirrorStoreStrategy implements IndexStoreStrategy {
         }
     }
 
-    private void remove(NodeBuilder index, String key, String value) {
+    protected void remove(NodeBuilder index, String key, String value) {
         ApproximateCounter.adjustCountSync(index, -1);
         NodeBuilder builder = index.getChildNode(key);
         if (builder.exists()) {
@@ -130,7 +130,7 @@ public class ContentMirrorStoreStrategy implements IndexStoreStrategy {
         }
     }
 
-    private void insert(NodeBuilder index, String key, String value) {
+    protected void insert(NodeBuilder index, String key, String value) {
         ApproximateCounter.adjustCountSync(index, 1);
         // NodeBuilder builder = index.child(key);
         NodeBuilder builder = fetchKeyNode(index, key);
