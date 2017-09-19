@@ -32,6 +32,7 @@ import javax.annotation.Nonnull;
 
 import org.apache.jackrabbit.oak.plugins.document.memory.MemoryDocumentStore;
 import org.apache.jackrabbit.oak.plugins.document.util.Utils;
+import org.apache.jackrabbit.oak.plugins.index.property.strategy.ContentMirrorStoreStrategy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -60,6 +61,9 @@ import static org.apache.jackrabbit.oak.plugins.document.NodeDocument.setPreviou
 import static org.apache.jackrabbit.oak.plugins.document.util.Utils.PROPERTY_OR_DELETED;
 import static org.apache.jackrabbit.oak.plugins.document.util.Utils.getPreviousIdFor;
 import static org.apache.jackrabbit.oak.plugins.document.util.Utils.isCommitted;
+import static org.apache.jackrabbit.oak.plugins.index.property.strategy.ContentMirrorStoreStrategy.getSlidingWindowLength;
+import static org.apache.jackrabbit.oak.plugins.index.property.strategy.ContentMirrorStoreStrategy.getVolatilityThreshold;
+import static org.apache.jackrabbit.oak.plugins.index.property.strategy.ContentMirrorStoreStrategy.isWorkloadAware;
 
 /**
  * Utility class to create document split operations.
@@ -424,29 +428,42 @@ class SplitOperations {
     /**
      * Collects all local property changes committed by the current
      * cluster node.
-     *
      * @param committedLocally local changes committed by the current cluster node.
      * @param changes all revisions of local changes (committed and uncommitted).
      */
     private void collectLocalChanges(
             Map<String, NavigableMap<Revision, String>> committedLocally,
             Set<Revision> changes) {
+
+        // for each public property or "_deleted"
         for (String property : filter(doc.keySet(), PROPERTY_OR_DELETED)) {
-            NavigableMap<Revision, String> splitMap
-                    = new TreeMap<Revision, String>(StableRevisionComparator.INSTANCE);
+            NavigableMap<Revision, String> splitMap = new TreeMap<Revision, String>(StableRevisionComparator.INSTANCE);
             committedLocally.put(property, splitMap);
+
+            // local property revisions
             Map<Revision, String> valueMap = doc.getLocalMap(property);
+
+            int count = 0;
+
             // collect committed changes of this cluster node
             for (Map.Entry<Revision, String> entry : valueMap.entrySet()) {
+                count++;
                 Revision rev = entry.getKey();
                 if (rev.getClusterId() != context.getClusterId()) {
                     continue;
                 }
-                changes.add(rev);
-                if (isCommitted(context.getCommitValue(rev, doc))) {
-                    splitMap.put(rev, entry.getValue());
-                } else if (isGarbage(rev)) {
-                    addGarbage(rev, property);
+
+                final boolean shouldAdd = (!isWorkloadAware())
+                        || (rev.getTimestamp() < System.currentTimeMillis() - getSlidingWindowLength())
+                        || (count > getVolatilityThreshold());
+
+                if (shouldAdd) {
+                    changes.add(rev);
+                    if (isCommitted(context.getCommitValue(rev, doc))) {
+                        splitMap.put(rev, entry.getValue());
+                    } else if (isGarbage(rev)) {
+                        addGarbage(rev, property);
+                    }
                 }
             }
         }

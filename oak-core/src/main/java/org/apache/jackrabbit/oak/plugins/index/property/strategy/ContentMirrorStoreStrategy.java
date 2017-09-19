@@ -606,60 +606,37 @@ public class ContentMirrorStoreStrategy implements IndexStoreStrategy {
      * @param builders list of nodes to prune
      */
     private void prune(final Deque<NodeBuilderPath> builders) {
-        Predicate<NodeBuilderPath> isNotMatching = new Predicate<NodeBuilderPath>() {
-            @Override
-            public boolean apply(@Nullable NodeBuilderPath input) {
-                return !input.nodeBuilder.getBoolean("match");
+        for (final NodeBuilderPath node : builders) {
+            if(node.nodeBuilder.getBoolean("match")){
+                return;
             }
-        };
-        Predicate<NodeBuilderPath> isLeaf = new Predicate<NodeBuilderPath>() {
-            @Override
-            public boolean apply(@Nullable NodeBuilderPath input) {
-                return input.nodeBuilder.getChildNodeCount(1) == 0;
+            if(node.nodeBuilder.getChildNodeCount(1) > 0){
+                return;
             }
-        };
-        Predicate<NodeBuilderPath> exists = new Predicate<NodeBuilderPath>() {
-            @Override
-            public boolean apply(@Nullable NodeBuilderPath input) {
-                return input.nodeBuilder.exists();
+            if(!node.nodeBuilder.exists()){
+                return;
             }
-        };
-        Predicate<NodeBuilderPath> isVolatile = new Predicate<NodeBuilderPath>() {
-            @Override
-            public boolean apply(@Nullable NodeBuilderPath input) {
-                Predicate<Revision> isInSlidingWindow = new Predicate<Revision>() {
-                    @Override
-                    public boolean apply(@Nullable Revision revision) {
-                        if (revision == null) {
-                            return false;
-                        }
-                        return revision.getTimestamp() > System.currentTimeMillis() - slidingWindowLength;
-                    }
-                };
-
-                NodeDocument nodeDocument = documentNodeStore.getDocumentStore().find(Collection.NODES, input.path);
-                if (nodeDocument == null) {
-                    return false;
-                }
-
-                Iterable<Revision> revisions = nodeDocument.getLocalDeleted().keySet();
-                revisions = abortingIterable(revisions, isInSlidingWindow);
-                revisions = skip(revisions, Math.max(volatilityThreshold - 1, 0));
-
-                return !isEmpty(revisions);
+            if(isWorkloadAware() && isVolatile(node.path)){
+                return;
             }
-        };
-
-        Iterable<NodeBuilderPath> nodesToRemove = builders;
-        nodesToRemove = filter(nodesToRemove, isNotMatching);
-        nodesToRemove = abortingIterable(nodesToRemove, isLeaf);
-        nodesToRemove = filter(nodesToRemove, exists);
-        if (isWorkloadAware()) {
-            nodesToRemove = filter(nodesToRemove, isVolatile);
-        }
-        for (NodeBuilderPath node : nodesToRemove) {
             node.nodeBuilder.remove();
         }
+    }
+
+    private static boolean isVolatile(final String path){
+        NodeDocument nodeDocument = documentNodeStore.getDocumentStore().find(Collection.NODES, path);
+        if (nodeDocument == null) {
+            return false;
+        }
+
+        int count = 0;
+        for (Revision r : nodeDocument.getLocalDeleted().keySet()){
+            if (r.getTimestamp() > System.currentTimeMillis() - getSlidingWindowLength()
+                    && (++count >= getVolatilityThreshold())){
+                return true;
+            }
+        }
+        return false;
     }
 
     @Override
@@ -682,6 +659,14 @@ public class ContentMirrorStoreStrategy implements IndexStoreStrategy {
     private static DocumentNodeStore documentNodeStore = null;
     private static int volatilityThreshold;
     private static int slidingWindowLength;
+
+    public static int getVolatilityThreshold() {
+        return volatilityThreshold;
+    }
+
+    public static int getSlidingWindowLength() {
+        return slidingWindowLength;
+    }
 
     public static void enableWorkloadAwareness(
             @Nonnull DocumentNodeStore documentNodeStore,
