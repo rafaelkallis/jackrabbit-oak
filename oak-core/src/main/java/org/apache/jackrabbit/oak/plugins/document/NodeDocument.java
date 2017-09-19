@@ -1679,7 +1679,7 @@ public final class NodeDocument extends Document {
     }
 
     @Nonnull
-    SortedMap<Revision, String> getLocalDeleted() {
+    public SortedMap<Revision, String> getLocalDeleted() {
         return getLocalMap(DELETED);
     }
 

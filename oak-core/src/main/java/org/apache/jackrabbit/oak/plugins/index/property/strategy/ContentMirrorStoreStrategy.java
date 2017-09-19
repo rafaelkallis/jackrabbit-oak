@@ -16,10 +16,12 @@
  */
 package org.apache.jackrabbit.oak.plugins.index.property.strategy;
 
+import static com.google.common.collect.Iterables.filter;
+import static com.google.common.collect.Iterables.isEmpty;
+import static com.google.common.collect.Iterables.skip;
 import static com.google.common.collect.Queues.newArrayDeque;
-import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.ENTRY_COUNT_PROPERTY_NAME;
-import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.INDEX_CONTENT_NODE_NAME;
-import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.KEY_COUNT_PROPERTY_NAME;
+import static org.apache.jackrabbit.oak.plugins.document.util.Utils.abortingIterable;
+import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.*;
 
 import java.util.Deque;
 import java.util.Iterator;
@@ -28,9 +30,14 @@ import java.util.Set;
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 
+import com.google.common.base.Predicate;
 import org.apache.jackrabbit.oak.api.PropertyState;
 import org.apache.jackrabbit.oak.api.Type;
 import org.apache.jackrabbit.oak.commons.PathUtils;
+import org.apache.jackrabbit.oak.plugins.document.Collection;
+import org.apache.jackrabbit.oak.plugins.document.DocumentNodeStore;
+import org.apache.jackrabbit.oak.plugins.document.NodeDocument;
+import org.apache.jackrabbit.oak.plugins.document.Revision;
 import org.apache.jackrabbit.oak.plugins.index.counter.ApproximateCounter;
 import org.apache.jackrabbit.oak.plugins.index.counter.NodeCounterEditor;
 import org.apache.jackrabbit.oak.plugins.index.counter.jmx.NodeCounter;
@@ -58,7 +65,7 @@ import com.google.common.collect.Sets;
  * <br>
  * For example for a node that is under {@code /test/node}, the index
  * structure will be {@code /oak:index/index/test/node}:
- * 
+ * <p>
  * <pre>
  * {@code
  * /
@@ -70,18 +77,17 @@ import com.google.common.collect.Sets;
  *         node
  * }
  * </pre>
- *
  */
 public class ContentMirrorStoreStrategy implements IndexStoreStrategy {
 
     static final Logger LOG = LoggerFactory.getLogger(ContentMirrorStoreStrategy.class);
-    
+
     /**
      * logging a warning every {@code oak.traversing.warn} traversed nodes. Default {@code 10000}
      */
     public static final int TRAVERSING_WARN = Integer.getInteger("oak.traversing.warn", 10000);
 
-    protected final String indexName;
+    private final String indexName;
 
     public ContentMirrorStoreStrategy() {
         this(INDEX_CONTENT_NODE_NAME);
@@ -91,46 +97,70 @@ public class ContentMirrorStoreStrategy implements IndexStoreStrategy {
         this.indexName = indexName;
     }
 
+    /**
+     * @param index      the index node supplier, NodeBuilder at "/oak:index/pub/:index/"
+     * @param path       path stored in the index, "/a/b"
+     * @param indexName  the name of the index. May be null. "pub"
+     * @param indexMeta  the definition of the index. May be null. NodeBuilder at "/oak:index/pub/"
+     * @param beforeKeys keys that no longer apply to the path, [ "now" ]
+     * @param afterKeys  keys that now do apply to the path, [ "now" ]
+     */
     @Override
     public void update(
-            Supplier<NodeBuilder> index, String path,
+            Supplier<NodeBuilder> index,
+            String path,
             @Nullable final String indexName,
             @Nullable final NodeBuilder indexMeta,
             Set<String> beforeKeys, Set<String> afterKeys) {
         for (String key : beforeKeys) {
-            remove(index.get(), key, path);
+            remove(index.get(), indexName, key, path);
         }
         for (String key : afterKeys) {
             insert(index.get(), key, path);
         }
     }
 
-    protected void remove(NodeBuilder index, String key, String value) {
+    private void remove(
+            final NodeBuilder index,
+            final @Nullable String indexName,
+            final String key,
+            final String path
+    ) {
         ApproximateCounter.adjustCountSync(index, -1);
         NodeBuilder builder = index.getChildNode(key);
         if (builder.exists()) {
             ApproximateCounter.adjustCountSync(builder, -1);
-            // Collect all builders along the given path
-            Deque<NodeBuilder> builders = newArrayDeque();
-            builders.addFirst(builder);
+            // Collect all builders and their absolute path along the given path
+            Deque<NodeBuilderPath> builders = newArrayDeque();
+            builders.addFirst(new NodeBuilderPath(
+                    builder,
+                    PathUtils.concat(
+                            "/" + INDEX_DEFINITIONS_NAME,
+                            "/" + indexName
+                    )
+            ));
 
             // Descend to the correct location in the index tree
-            for (String name : PathUtils.elements(value)) {
-                builder = builder.getChildNode(name);
-                builders.addFirst(builder);
+            for (String name : PathUtils.elements(path)) {
+                NodeBuilderPath parent = builders.peekFirst();
+                builders.addFirst(new NodeBuilderPath(
+                        parent.nodeBuilder.getChildNode(name),
+                        PathUtils.concat(parent.path, name)
+                ));
             }
 
-            // Drop the match value,  if present
-            if (builder.exists()) {
-                builder.removeProperty("match");
+            // Drop the match value, if present
+            NodeBuilder target = builders.peekFirst().nodeBuilder;
+            if (target.exists()) {
+                target.removeProperty("match");
             }
 
             // Prune all index nodes that are no longer needed
-            prune(index, builders, key);
+            prune(builders);
         }
     }
 
-    protected void insert(NodeBuilder index, String key, String value) {
+    private void insert(NodeBuilder index, String key, String value) {
         ApproximateCounter.adjustCountSync(index, 1);
         // NodeBuilder builder = index.child(key);
         NodeBuilder builder = fetchKeyNode(index, key);
@@ -142,8 +172,8 @@ public class ContentMirrorStoreStrategy implements IndexStoreStrategy {
     }
 
     public Iterable<String> query(final Filter filter, final String indexName,
-            final NodeState indexMeta, final String indexStorageNodeName,
-            final Iterable<String> values) {
+                                  final NodeState indexMeta, final String indexStorageNodeName,
+                                  final Iterable<String> values) {
         final NodeState index = indexMeta.getChildNode(indexStorageNodeName);
         return new Iterable<String>() {
             @Override
@@ -168,14 +198,13 @@ public class ContentMirrorStoreStrategy implements IndexStoreStrategy {
     }
 
     @Nonnull
-    Iterable<? extends ChildNodeEntry> getChildNodeEntries(@Nonnull
-    final NodeState index) {
+    Iterable<? extends ChildNodeEntry> getChildNodeEntries(@Nonnull final NodeState index) {
         return index.getChildNodeEntries();
     }
 
     @Override
     public Iterable<String> query(final Filter filter, final String name,
-            final NodeState indexMeta, final Iterable<String> values) {
+                                  final NodeState indexMeta, final Iterable<String> values) {
         return query(filter, name, indexMeta, this.indexName, values);
     }
 
@@ -190,7 +219,7 @@ public class ContentMirrorStoreStrategy implements IndexStoreStrategy {
     }
 
     long count(Filter filter, NodeState root, NodeState indexMeta, final String indexStorageNodeName,
-            Set<String> values, int max) {
+               Set<String> values, int max) {
         NodeState index = indexMeta.getChildNode(indexStorageNodeName);
         long count = -1;
         if (values == null) {
@@ -218,7 +247,7 @@ public class ContentMirrorStoreStrategy implements IndexStoreStrategy {
             if (size == 0) {
                 return 0;
             }
-            PropertyState ec = indexMeta.getProperty(ENTRY_COUNT_PROPERTY_NAME);       
+            PropertyState ec = indexMeta.getProperty(ENTRY_COUNT_PROPERTY_NAME);
             if (ec != null) {
                 count = ec.getValue(Type.LONG);
                 if (count >= 0) {
@@ -316,7 +345,7 @@ public class ContentMirrorStoreStrategy implements IndexStoreStrategy {
      * An iterator over paths within an index node.
      */
     static class PathIterator implements Iterator<String> {
-        
+
         private final Filter filter;
         private final String indexName;
         private final Deque<Iterator<? extends ChildNodeEntry>> nodeIterators =
@@ -330,7 +359,7 @@ public class ContentMirrorStoreStrategy implements IndexStoreStrategy {
         private String parentPath;
         private String currentPath;
         private boolean pathContainsValue;
-        
+
         /**
          * Keep the returned path, to avoid returning duplicate entries.
          */
@@ -342,14 +371,14 @@ public class ContentMirrorStoreStrategy implements IndexStoreStrategy {
             this.pathPrefix = pathPrefix;
             this.indexName = indexName;
             boolean shouldDescendDirectly = filter.getPathRestriction().equals(Filter.PathRestriction.ALL_CHILDREN);
-            if (shouldDescendDirectly) {            
+            if (shouldDescendDirectly) {
                 filterPath = filter.getPath();
                 if (PathUtils.denotesRoot(filterPath)) {
                     filterPath = "";
                 }
             } else {
                 filterPath = "";
-            }            
+            }
             parentPath = "";
             currentPath = "/";
             this.settings = filter.getQueryLimits();
@@ -413,16 +442,16 @@ public class ContentMirrorStoreStrategy implements IndexStoreStrategy {
                         String p = currentPath;
                         if (pathContainsValue) {
                             String value = PathUtils.elements(p).iterator().next();
-                            p = PathUtils.relativize(value, p);                        
+                            p = PathUtils.relativize(value, p);
                         }
                         if ("".equals(pathPrefix)) {
                             p = PathUtils.concat("/", p);
                         } else {
                             p = PathUtils.concat(pathPrefix, p);
                         }
-                        if (!"".equals(p) && 
-                                !p.equals(filterPath) && 
-                                !PathUtils.isAncestor(p, filterPath) && 
+                        if (!"".equals(p) &&
+                                !p.equals(filterPath) &&
+                                !PathUtils.isAncestor(p, filterPath) &&
                                 !PathUtils.isAncestor(filterPath, p)) {
                             continue;
                         }
@@ -530,7 +559,7 @@ public class ContentMirrorStoreStrategy implements IndexStoreStrategy {
 
         /**
          * The number of matches (at most the maximum count).
-         * 
+         *
          * @return the match count
          */
         int getCount() {
@@ -542,7 +571,7 @@ public class ContentMirrorStoreStrategy implements IndexStoreStrategy {
          * number of counted matches, if the maximum number of matches has been
          * reached. It is based on the average depth of matches, and the average
          * number of child nodes.
-         * 
+         *
          * @return the estimated matches
          */
         int getEstimatedCount() {
@@ -558,37 +587,78 @@ public class ContentMirrorStoreStrategy implements IndexStoreStrategy {
         }
 
     }
-    
+
     /**
      * fetch from the index the <i>key</i> node
-     * 
-     * @param index
-     *            the current index root
-     * @param key
-     *            the 'key' to fetch from the repo
+     *
+     * @param index the current index root
+     * @param key   the 'key' to fetch from the repo
      * @return the node representing the key
      */
-    NodeBuilder fetchKeyNode(@Nonnull NodeBuilder index, 
+    NodeBuilder fetchKeyNode(@Nonnull NodeBuilder index,
                              @Nonnull String key) {
         return index.child(key);
     }
 
     /**
      * Physically prune a list of nodes from the index
-     * 
-     * @param index
-     *            the current index
-     * @param builders
-     *            list of nodes to prune
-     * @param key the key of the index we're processing
+     *
+     * @param builders list of nodes to prune
      */
-    void prune(final NodeBuilder index, final Deque<NodeBuilder> builders, final String key) {
-        for (NodeBuilder node : builders) {
-            if (node.getBoolean("match") || node.getChildNodeCount(1) > 0) {
-                return;
-            } else if (node.exists()) {
-                node.remove();
+    private void prune(final Deque<NodeBuilderPath> builders) {
+        Predicate<NodeBuilderPath> isNotMatching = new Predicate<NodeBuilderPath>() {
+            @Override
+            public boolean apply(@Nullable NodeBuilderPath input) {
+                return !input.nodeBuilder.getBoolean("match");
             }
+        };
+        Predicate<NodeBuilderPath> isLeaf = new Predicate<NodeBuilderPath>() {
+            @Override
+            public boolean apply(@Nullable NodeBuilderPath input) {
+                return input.nodeBuilder.getChildNodeCount(1) == 0;
+            }
+        };
+        Predicate<NodeBuilderPath> exists = new Predicate<NodeBuilderPath>() {
+            @Override
+            public boolean apply(@Nullable NodeBuilderPath input) {
+                return input.nodeBuilder.exists();
+            }
+        };
+        Predicate<NodeBuilderPath> isVolatile = new Predicate<NodeBuilderPath>() {
+            @Override
+            public boolean apply(@Nullable NodeBuilderPath input) {
+                Predicate<Revision> isInSlidingWindow = new Predicate<Revision>() {
+                    @Override
+                    public boolean apply(@Nullable Revision revision) {
+                        if (revision == null) {
+                            return false;
+                        }
+                        return revision.getTimestamp() > System.currentTimeMillis() - slidingWindowLength;
+                    }
+                };
+
+                NodeDocument nodeDocument = documentNodeStore.getDocumentStore().find(Collection.NODES, input.path);
+                if (nodeDocument == null) {
+                    return false;
+                }
+
+                Iterable<Revision> revisions = nodeDocument.getLocalDeleted().keySet();
+                revisions = abortingIterable(revisions, isInSlidingWindow);
+                revisions = skip(revisions, Math.max(volatilityThreshold - 1, 0));
+
+                return !isEmpty(revisions);
+            }
+        };
+
+        Iterable<NodeBuilderPath> nodesToRemove = builders;
+        nodesToRemove = filter(nodesToRemove, isNotMatching);
+        nodesToRemove = abortingIterable(nodesToRemove, isLeaf);
+        nodesToRemove = filter(nodesToRemove, exists);
+        if (isWorkloadAware()) {
+            nodesToRemove = filter(nodesToRemove, isVolatile);
+        }
+        for (NodeBuilderPath node : nodesToRemove) {
+            node.nodeBuilder.remove();
         }
     }
 
@@ -599,10 +669,41 @@ public class ContentMirrorStoreStrategy implements IndexStoreStrategy {
         // We would need to traverse the tree and search for an entry "match".
         // See also OAK-2663 for a potential (but untested) implementation.
         throw new UnsupportedOperationException();
-   }
+    }
 
     @Override
     public String getIndexNodeName() {
         return indexName;
+    }
+
+    public static final int VOLATILITY_THRESHOLD = 5;
+    public static final int SLIDING_WINDOW_LENGTH = 24 * 60 * 60 * 1000;
+
+    private static DocumentNodeStore documentNodeStore = null;
+    private static int volatilityThreshold;
+    private static int slidingWindowLength;
+
+    public static void enableWorkloadAwareness(
+            @Nonnull DocumentNodeStore documentNodeStore,
+            int volatilityThreshold,
+            int slidindWindowLength
+    ) {
+        ContentMirrorStoreStrategy.documentNodeStore = documentNodeStore;
+        ContentMirrorStoreStrategy.volatilityThreshold = volatilityThreshold;
+        ContentMirrorStoreStrategy.slidingWindowLength = slidindWindowLength;
+    }
+
+    public static boolean isWorkloadAware() {
+        return documentNodeStore != null;
+    }
+
+    private static class NodeBuilderPath {
+        private NodeBuilder nodeBuilder;
+        private String path;
+
+        public NodeBuilderPath(NodeBuilder nodeBuilder, String path) {
+            this.nodeBuilder = nodeBuilder;
+            this.path = path;
+        }
     }
 }

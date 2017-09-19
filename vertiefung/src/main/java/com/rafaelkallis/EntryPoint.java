@@ -14,6 +14,7 @@ import static com.rafaelkallis.Util.invariant;
 public class EntryPoint {
 
     public static void main(String[] args) {
+        ClusterNode.initializePropertyIndex("pub");
         performAvoidableConflict();
         performQuery();
     }
@@ -35,7 +36,9 @@ public class EntryPoint {
         // act
         Commitable t4 = ClusterNode.simpleWrite(root -> root.getTree("/home/news/breaking").removeProperty("pub"));
         Commitable t5 = ClusterNode.simpleWrite(root -> root.getTree("/home/loans/rates").setProperty("pub", "now"));
+        System.err.println("BEFORE !!!!!!!!!!!!!!!!!!!!!!!!!!!!");
         invariant(t4.commit() && t5.commit(), "t4 or t5 failed");
+        System.err.println("AFTER !!!!!!!!!!!!!!!!!!!!!!!!!!!!");
 
         // assert
         invariant(ClusterNode.simpleWrite(root -> {

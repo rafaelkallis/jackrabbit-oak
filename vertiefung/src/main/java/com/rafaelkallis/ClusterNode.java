@@ -1,20 +1,22 @@
 package com.rafaelkallis;
 
+import com.google.common.collect.ImmutableList;
 import com.mongodb.MongoClient;
 import org.apache.jackrabbit.oak.InitialContent;
 import org.apache.jackrabbit.oak.Oak;
-import org.apache.jackrabbit.oak.api.CommitFailedException;
-import org.apache.jackrabbit.oak.api.ContentRepository;
-import org.apache.jackrabbit.oak.api.ContentSession;
-import org.apache.jackrabbit.oak.api.Root;
+import org.apache.jackrabbit.oak.api.*;
 import org.apache.jackrabbit.oak.plugins.document.DocumentMK;
+import org.apache.jackrabbit.oak.plugins.document.DocumentNodeState;
 import org.apache.jackrabbit.oak.plugins.document.DocumentNodeStore;
+import org.apache.jackrabbit.oak.plugins.index.IndexUtils;
 import org.apache.jackrabbit.oak.plugins.index.property.PropertyIndexEditorProvider;
 import org.apache.jackrabbit.oak.plugins.index.property.PropertyIndexProvider;
 import org.apache.jackrabbit.oak.spi.security.OpenSecurityProvider;
+import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
 
 import javax.jcr.NoSuchWorkspaceException;
 import javax.security.auth.login.LoginException;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.function.Consumer;
@@ -59,6 +61,7 @@ public class ClusterNode {
             this.nodeStore = new DocumentMK.Builder()
                     .setMongoDB(this.mongoClient.getDB("oak"))
                     .setClusterId(this.clusterId)
+                    .setAsyncDelay(30000)
                     .getNodeStore();
 
             final Oak oak = new Oak(nodeStore)
@@ -67,9 +70,16 @@ public class ClusterNode {
                     .with(new PropertyIndexEditorProvider())
                     .with(new PropertyIndexProvider());
 
-            this.contentRepository = oak.createContentRepository();
-            this.ready = true;
 
+            this.contentRepository = oak.createContentRepository();
+
+
+//            NodeBuilder root = this.nodeStore.getRoot().builder();
+//            NodeBuilder index = IndexUtils.getOrCreateOakIndex(root);
+//            IndexUtils.createIndexDefinition(index, "pub_index",true,false, Collections.singleton("pub"),null);
+//            root.
+
+            this.ready = true;
         }
         return this;
     }
@@ -125,5 +135,19 @@ public class ClusterNode {
             clusterNode.tearDown();
             return () -> false;
         }
+    }
+
+    public static void initializePropertyIndex(String propName) {
+        ClusterNode.simpleWrite(root -> {
+            Tree index = root.getTree("/oak:index");
+            if (!index.hasChild(propName)) {
+                Tree prop = index.addChild(propName);
+                prop.setProperty("type", "property");
+                prop.setProperty("jcr:primaryType", "oak:QueryIndexDefinition", Type.NAME);
+                prop.setProperty("propertyNames", Collections.singleton(propName), Type.NAMES);
+                prop.setProperty("unique", false);
+                prop.setProperty("reindex", true);
+            }
+        }).commit();
     }
 }
