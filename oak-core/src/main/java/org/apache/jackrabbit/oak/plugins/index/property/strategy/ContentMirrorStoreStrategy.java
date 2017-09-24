@@ -16,28 +16,16 @@
  */
 package org.apache.jackrabbit.oak.plugins.index.property.strategy;
 
-import static com.google.common.collect.Iterables.filter;
-import static com.google.common.collect.Iterables.isEmpty;
-import static com.google.common.collect.Iterables.skip;
-import static com.google.common.collect.Queues.newArrayDeque;
-import static org.apache.jackrabbit.oak.plugins.document.util.Utils.abortingIterable;
-import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.*;
-
-import java.util.Deque;
-import java.util.Iterator;
-import java.util.Set;
-
-import javax.annotation.Nonnull;
-import javax.annotation.Nullable;
-
-import com.google.common.base.Predicate;
+import com.google.common.base.Supplier;
+import com.google.common.collect.Iterables;
+import com.google.common.collect.Iterators;
+import com.google.common.collect.Queues;
+import com.google.common.collect.Sets;
+import com.rafaelkallis.WAPI;
 import org.apache.jackrabbit.oak.api.PropertyState;
 import org.apache.jackrabbit.oak.api.Type;
 import org.apache.jackrabbit.oak.commons.PathUtils;
-import org.apache.jackrabbit.oak.plugins.document.Collection;
-import org.apache.jackrabbit.oak.plugins.document.DocumentNodeStore;
-import org.apache.jackrabbit.oak.plugins.document.NodeDocument;
-import org.apache.jackrabbit.oak.plugins.document.Revision;
+import org.apache.jackrabbit.oak.plugins.document.DocumentNodeState;
 import org.apache.jackrabbit.oak.plugins.index.counter.ApproximateCounter;
 import org.apache.jackrabbit.oak.plugins.index.counter.NodeCounterEditor;
 import org.apache.jackrabbit.oak.plugins.index.counter.jmx.NodeCounter;
@@ -52,10 +40,17 @@ import org.apache.jackrabbit.oak.spi.state.NodeStateUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import com.google.common.base.Supplier;
-import com.google.common.collect.Iterators;
-import com.google.common.collect.Queues;
-import com.google.common.collect.Sets;
+import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
+import java.util.Deque;
+import java.util.Iterator;
+import java.util.Set;
+
+import static com.google.common.collect.Queues.newArrayDeque;
+import static com.rafaelkallis.WAPI.getDocumentFromAbsPath;
+import static com.rafaelkallis.WAPI.isVolatile;
+import static com.rafaelkallis.WAPI.isWorkloadAware;
+import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.*;
 
 /**
  * An IndexStoreStrategy implementation that saves the nodes under a hierarchy
@@ -134,10 +129,7 @@ public class ContentMirrorStoreStrategy implements IndexStoreStrategy {
             Deque<NodeBuilderPath> builders = newArrayDeque();
             builders.addFirst(new NodeBuilderPath(
                     builder,
-                    PathUtils.concat(
-                            "/" + INDEX_DEFINITIONS_NAME,
-                            "/" + indexName
-                    )
+                    PathUtils.concat("/" + INDEX_DEFINITIONS_NAME, indexName, key)
             ));
 
             // Descend to the correct location in the index tree
@@ -607,37 +599,23 @@ public class ContentMirrorStoreStrategy implements IndexStoreStrategy {
      */
     private void prune(final Deque<NodeBuilderPath> builders) {
         for (final NodeBuilderPath node : builders) {
-            if(node.nodeBuilder.getBoolean("match")){
+            if (node.nodeBuilder.getBoolean("match")) {
                 return;
             }
-            if(node.nodeBuilder.getChildNodeCount(1) > 0){
+            if (node.nodeBuilder.getChildNodeCount(1) > 0) {
                 return;
             }
-            if(!node.nodeBuilder.exists()){
+            if (!node.nodeBuilder.exists()) {
                 return;
             }
-            if(isWorkloadAware() && isVolatile(node.path)){
+            if (isWorkloadAware() && isVolatile(getDocumentFromAbsPath(node.path))) {
                 return;
             }
             node.nodeBuilder.remove();
         }
     }
 
-    private static boolean isVolatile(final String path){
-        NodeDocument nodeDocument = documentNodeStore.getDocumentStore().find(Collection.NODES, path);
-        if (nodeDocument == null) {
-            return false;
-        }
 
-        int count = 0;
-        for (Revision r : nodeDocument.getLocalDeleted().keySet()){
-            if (r.getTimestamp() > System.currentTimeMillis() - getSlidingWindowLength()
-                    && (++count >= getVolatilityThreshold())){
-                return true;
-            }
-        }
-        return false;
-    }
 
     @Override
     public boolean exists(Supplier<NodeBuilder> index, String key) {
@@ -653,34 +631,7 @@ public class ContentMirrorStoreStrategy implements IndexStoreStrategy {
         return indexName;
     }
 
-    public static final int VOLATILITY_THRESHOLD = 5;
-    public static final int SLIDING_WINDOW_LENGTH = 24 * 60 * 60 * 1000;
 
-    private static DocumentNodeStore documentNodeStore = null;
-    private static int volatilityThreshold;
-    private static int slidingWindowLength;
-
-    public static int getVolatilityThreshold() {
-        return volatilityThreshold;
-    }
-
-    public static int getSlidingWindowLength() {
-        return slidingWindowLength;
-    }
-
-    public static void enableWorkloadAwareness(
-            @Nonnull DocumentNodeStore documentNodeStore,
-            int volatilityThreshold,
-            int slidindWindowLength
-    ) {
-        ContentMirrorStoreStrategy.documentNodeStore = documentNodeStore;
-        ContentMirrorStoreStrategy.volatilityThreshold = volatilityThreshold;
-        ContentMirrorStoreStrategy.slidingWindowLength = slidindWindowLength;
-    }
-
-    public static boolean isWorkloadAware() {
-        return documentNodeStore != null;
-    }
 
     private static class NodeBuilderPath {
         private NodeBuilder nodeBuilder;

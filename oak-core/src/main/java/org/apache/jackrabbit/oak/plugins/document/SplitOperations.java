@@ -18,24 +18,6 @@
  */
 package org.apache.jackrabbit.oak.plugins.document;
 
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
-import java.util.Map;
-import java.util.NavigableMap;
-import java.util.Set;
-import java.util.SortedMap;
-import java.util.TreeMap;
-
-import javax.annotation.CheckForNull;
-import javax.annotation.Nonnull;
-
-import org.apache.jackrabbit.oak.plugins.document.memory.MemoryDocumentStore;
-import org.apache.jackrabbit.oak.plugins.document.util.Utils;
-import org.apache.jackrabbit.oak.plugins.index.property.strategy.ContentMirrorStoreStrategy;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-
 import com.google.common.base.Function;
 import com.google.common.base.Predicate;
 import com.google.common.base.Supplier;
@@ -43,27 +25,22 @@ import com.google.common.base.Suppliers;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
+import org.apache.jackrabbit.oak.plugins.document.memory.MemoryDocumentStore;
+import org.apache.jackrabbit.oak.plugins.document.util.Utils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import javax.annotation.CheckForNull;
+import javax.annotation.Nonnull;
+import java.util.*;
 
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.collect.Iterables.any;
 import static com.google.common.collect.Iterables.transform;
 import static com.google.common.collect.Sets.filter;
-import static org.apache.jackrabbit.oak.plugins.document.NodeDocument.COMMIT_ROOT;
-import static org.apache.jackrabbit.oak.plugins.document.NodeDocument.DOC_SIZE_THRESHOLD;
-import static org.apache.jackrabbit.oak.plugins.document.NodeDocument.PREV_SPLIT_FACTOR;
-import static org.apache.jackrabbit.oak.plugins.document.NodeDocument.REVISIONS;
-import static org.apache.jackrabbit.oak.plugins.document.NodeDocument.SplitDocType;
-import static org.apache.jackrabbit.oak.plugins.document.NodeDocument.isCommitRootEntry;
-import static org.apache.jackrabbit.oak.plugins.document.NodeDocument.isRevisionsEntry;
-import static org.apache.jackrabbit.oak.plugins.document.NodeDocument.removePrevious;
-import static org.apache.jackrabbit.oak.plugins.document.NodeDocument.setHasBinary;
-import static org.apache.jackrabbit.oak.plugins.document.NodeDocument.setPrevious;
-import static org.apache.jackrabbit.oak.plugins.document.util.Utils.PROPERTY_OR_DELETED;
-import static org.apache.jackrabbit.oak.plugins.document.util.Utils.getPreviousIdFor;
-import static org.apache.jackrabbit.oak.plugins.document.util.Utils.isCommitted;
-import static org.apache.jackrabbit.oak.plugins.index.property.strategy.ContentMirrorStoreStrategy.getSlidingWindowLength;
-import static org.apache.jackrabbit.oak.plugins.index.property.strategy.ContentMirrorStoreStrategy.getVolatilityThreshold;
-import static org.apache.jackrabbit.oak.plugins.index.property.strategy.ContentMirrorStoreStrategy.isWorkloadAware;
+import static com.rafaelkallis.WAPI.*;
+import static org.apache.jackrabbit.oak.plugins.document.NodeDocument.*;
+import static org.apache.jackrabbit.oak.plugins.document.util.Utils.*;
 
 /**
  * Utility class to create document split operations.
@@ -437,7 +414,8 @@ class SplitOperations {
 
         // for each public property or "_deleted"
         for (String property : filter(doc.keySet(), PROPERTY_OR_DELETED)) {
-            NavigableMap<Revision, String> splitMap = new TreeMap<Revision, String>(StableRevisionComparator.INSTANCE);
+            NavigableMap<Revision, String> splitMap =
+                    new TreeMap<Revision, String>(StableRevisionComparator.INSTANCE);
             committedLocally.put(property, splitMap);
 
             // local property revisions
@@ -447,17 +425,19 @@ class SplitOperations {
 
             // collect committed changes of this cluster node
             for (Map.Entry<Revision, String> entry : valueMap.entrySet()) {
-                count++;
                 Revision rev = entry.getKey();
-                if (rev.getClusterId() != context.getClusterId()) {
-                    continue;
+
+                if (isWorkloadAware() && property.equals("_deleted")) {
+                    if (!isVisible(rev)){
+                        continue;
+                    }
+
+                    if (++count <= getVolatilityThreshold() && isInSlidingWindow(rev)){
+                        continue;
+                    }
                 }
 
-                final boolean shouldAdd = (!isWorkloadAware())
-                        || (rev.getTimestamp() < System.currentTimeMillis() - getSlidingWindowLength())
-                        || (count > getVolatilityThreshold());
-
-                if (shouldAdd) {
+                if (rev.getClusterId() == context.getClusterId()) {
                     changes.add(rev);
                     if (isCommitted(context.getCommitValue(rev, doc))) {
                         splitMap.put(rev, entry.getValue());

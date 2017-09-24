@@ -110,7 +110,7 @@ public final class Revision implements CacheValue {
      * @return -1 if this revision occurred earlier, 1 if later, 0 if equal
      * @throws IllegalArgumentException if the cluster ids don't match
      */
-    int compareRevisionTime(Revision other) {
+    public int compareRevisionTime(Revision other) {
         if (clusterId != other.clusterId) {
             throw new IllegalArgumentException(
                     "Trying to compare revisions of different cluster ids: " +
