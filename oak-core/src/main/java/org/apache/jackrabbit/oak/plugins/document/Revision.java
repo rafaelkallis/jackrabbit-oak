@@ -131,7 +131,7 @@ public final class Revision implements CacheValue {
      * @param other the other revision
      * @return -1 if this revision occurred earlier, 1 if later, 0 if equal
      */
-    int compareRevisionTimeThenClusterId(Revision other) {
+    public int compareRevisionTimeThenClusterId(Revision other) {
         int comp = timestamp < other.timestamp ? -1 : timestamp > other.timestamp ? 1 : 0;
         if (comp == 0) {
             comp = counter < other.counter ? -1 : counter > other.counter ? 1 : 0;

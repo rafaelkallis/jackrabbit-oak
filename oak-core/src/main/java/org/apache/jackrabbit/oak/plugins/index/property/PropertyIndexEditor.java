@@ -37,12 +37,17 @@ import javax.annotation.Nonnull;
 import javax.jcr.PropertyType;
 
 import com.google.common.base.Supplier;
+import com.google.common.collect.ImmutableSet;
 import org.apache.jackrabbit.oak.api.CommitFailedException;
 import org.apache.jackrabbit.oak.api.PropertyState;
+import org.apache.jackrabbit.oak.plugins.document.Document;
+import org.apache.jackrabbit.oak.plugins.document.DocumentNodeStore;
+import org.apache.jackrabbit.oak.plugins.document.RevisionContext;
 import org.apache.jackrabbit.oak.plugins.index.IndexConstants;
 import org.apache.jackrabbit.oak.plugins.index.IndexEditor;
 import org.apache.jackrabbit.oak.plugins.index.IndexUpdateCallback;
 import org.apache.jackrabbit.oak.plugins.index.PathFilter;
+import org.apache.jackrabbit.oak.plugins.index.property.strategy.ContentMirrorStoreStrategy;
 import org.apache.jackrabbit.oak.plugins.index.property.strategy.IndexStoreStrategy;
 import org.apache.jackrabbit.oak.plugins.nodetype.TypePredicate;
 import org.apache.jackrabbit.oak.spi.commit.Editor;
@@ -55,39 +60,51 @@ import com.google.common.base.Predicate;
 
 /**
  * Index editor for keeping a property index up to date.
- * 
+ *
  * @see PropertyIndex
  * @see PropertyIndexLookup
  */
 class PropertyIndexEditor implements IndexEditor {
 
-    /** Parent editor, or {@code null} if this is the root editor. */
+    /**
+     * Parent editor, or {@code null} if this is the root editor.
+     */
     private final PropertyIndexEditor parent;
 
-    /** Name of this node, or {@code null} for the root node. */
+    /**
+     * Name of this node, or {@code null} for the root node.
+     */
     private final String name;
 
-    /** Path of this editor, built lazily in {@link #getPath()}. */
+    /**
+     * Path of this editor, built lazily in {@link #getPath()}.
+     */
     private String path;
 
-    /** Index definition node builder */
-    private final NodeBuilder definition;
+    /**
+     * Index definition node builder
+     */
+    protected final NodeBuilder definition;
 
-    /** Root node state */
+    /**
+     * Root node state
+     */
     private final NodeState root;
 
     private final Set<String> propertyNames;
-    
+
     private final ValuePattern valuePattern;
 
-    /** Type predicate, or {@code null} if there are no type restrictions */
-    private final Predicate<NodeState> typePredicate;
+    /**
+     * Type predicate, or {@code null} if there are no type restrictions
+     */
+    protected final Predicate<NodeState> typePredicate;
 
     /**
      * This field is only set for unique indexes. Otherwise it is null.
      * Keys to check for uniqueness, or {@code null} for no uniqueness checks.
      */
-    private final Set<String> keysToCheckForUniqueness;
+    protected final Set<String> keysToCheckForUniqueness;
 
     /**
      * Flag to indicate whether the type of this node may have changed.
@@ -97,28 +114,34 @@ class PropertyIndexEditor implements IndexEditor {
     /**
      * Matching property value keys from the before state. Lazily initialized.
      */
-    private Set<String> beforeKeys;
+    protected Set<String> beforeKeys;
 
     /**
      * Matching property value keys from the after state. Lazily initialized.
      */
-    private Set<String> afterKeys;
+    protected Set<String> afterKeys;
 
-    private final IndexUpdateCallback updateCallback;
+    protected final IndexUpdateCallback updateCallback;
 
     private final PathFilter pathFilter;
 
-    private final PathFilter.Result pathFilterResult;
+    protected final PathFilter.Result pathFilterResult;
 
     private final MountInfoProvider mountInfoProvider;
 
-    public PropertyIndexEditor(NodeBuilder definition, NodeState root,
-                               IndexUpdateCallback updateCallback, MountInfoProvider mountInfoProvider) {
+    private final DocumentNodeStore documentNodeStore;
+
+    public PropertyIndexEditor(NodeBuilder definition,
+                               NodeState root,
+                               IndexUpdateCallback updateCallback,
+                               MountInfoProvider mountInfoProvider,
+                               DocumentNodeStore documentNodeStore) {
         this.parent = null;
         this.name = null;
         this.path = "/";
         this.definition = definition;
         this.root = root;
+        this.documentNodeStore = documentNodeStore;
         pathFilter = PathFilter.from(definition);
         pathFilterResult = getPathFilterResult();
 
@@ -126,7 +149,7 @@ class PropertyIndexEditor implements IndexEditor {
 
         // get property names
         PropertyState names = definition.getProperty(PROPERTY_NAMES);
-        if (names.count() == 1) { 
+        if (names.count() == 1) {
             // OAK-1273: optimize for the common case
             this.propertyNames = singleton(names.getValue(NAME, 0));
         } else {
@@ -152,7 +175,7 @@ class PropertyIndexEditor implements IndexEditor {
         this.updateCallback = updateCallback;
         this.mountInfoProvider = mountInfoProvider;
     }
-    
+
     PropertyIndexEditor(PropertyIndexEditor parent, String name, PathFilter.Result pathFilterResult) {
         this.parent = parent;
         this.name = name;
@@ -167,21 +190,22 @@ class PropertyIndexEditor implements IndexEditor {
         this.pathFilter = parent.pathFilter;
         this.pathFilterResult = pathFilterResult;
         this.mountInfoProvider = parent.mountInfoProvider;
+        this.documentNodeStore = parent.documentNodeStore;
     }
-    
+
     /**
      * commodity method for allowing extensions
-     * 
+     *
      * @return the propertyNames
      */
     Set<String> getPropertyNames() {
-       return propertyNames;
+        return propertyNames;
     }
 
     /**
      * Returns the path of this node, building it lazily when first requested.
      */
-    private String getPath() {
+    protected String getPath() {
         if (path == null) {
             path = concat(parent.getPath(), name);
         }
@@ -194,7 +218,7 @@ class PropertyIndexEditor implements IndexEditor {
      * set is created for any values to be added. The set, possibly newly
      * initialized, is returned.
      *
-     * @param keys set of encoded values, or {@code null}
+     * @param keys     set of encoded values, or {@code null}
      * @param property property whose values are to be added to the set
      * @return set of encoded values, possibly initialized
      */
@@ -222,16 +246,18 @@ class PropertyIndexEditor implements IndexEditor {
         return keys;
     }
 
-    Set<IndexStoreStrategy> getStrategies(boolean unique) {
-        return Multiplexers.getStrategies(unique, mountInfoProvider,
-                definition, INDEX_CONTENT_NODE_NAME);
+    private Set<IndexStoreStrategy> getStrategies(boolean unique) {
+        // TODO
+//        return Multiplexers.getStrategies(unique, mountInfoProvider,
+//                definition, INDEX_CONTENT_NODE_NAME);
+        return ImmutableSet.of(new ContentMirrorStoreStrategy(this.documentNodeStore));
     }
 
     @Override
     public void enter(NodeState before, NodeState after) {
         // disables property name checks
-        typeChanged = typePredicate == null; 
-        
+        typeChanged = typePredicate == null;
+
         beforeKeys = null;
         afterKeys = null;
     }
@@ -245,10 +271,10 @@ class PropertyIndexEditor implements IndexEditor {
             updateIndex(before, after);
         }
         checkUniquenessConstraints();
-        
+
     }
-    
-    private void applyTypeRestrictions(NodeState before, NodeState after) {
+
+    protected void applyTypeRestrictions(NodeState before, NodeState after) {
         // apply the type restrictions
         if (typePredicate != null) {
             if (typeChanged) {
@@ -267,7 +293,7 @@ class PropertyIndexEditor implements IndexEditor {
             }
         }
     }
-    
+
     private void updateIndex(NodeState before, NodeState after) throws CommitFailedException {
         // if any changes were detected, update the index accordingly
         if (beforeKeys != null || afterKeys != null) {
@@ -304,7 +330,7 @@ class PropertyIndexEditor implements IndexEditor {
         checkUniquenessConstraints();
     }
 
-    private void checkUniquenessConstraints() throws CommitFailedException {
+    protected void checkUniquenessConstraints() throws CommitFailedException {
         if (parent == null) {
             // make sure that the index node exist, even with no content
             definition.child(INDEX_CONTENT_NODE_NAME);
@@ -329,13 +355,13 @@ class PropertyIndexEditor implements IndexEditor {
 
     /**
      * From a set of keys, get those that already exist in the index.
-     * 
-     * @param keys the keys
+     *
+     * @param keys  the keys
      * @param index the index
-     * @param s the index store strategy
+     * @param s     the index store strategy
      * @return the set of keys that already exist in this unique index
      */
-    private Set<String> getExistingKeys(Set<String> keys, Supplier<NodeBuilder> index, IndexStoreStrategy s) {
+    protected Set<String> getExistingKeys(Set<String> keys, Supplier<NodeBuilder> index, IndexStoreStrategy s) {
         Set<String> existing = null;
         for (String key : keys) {
             if (s.exists(index, key)) {
@@ -353,8 +379,8 @@ class PropertyIndexEditor implements IndexEditor {
 
     /**
      * From a set of keys, get the first that has multiple entries, if any.
-     * 
-     * @param keys the keys
+     *
+     * @param keys      the keys
      * @param indexMeta the index configuration
      * @return the first duplicate, or null if none was found
      */
@@ -405,15 +431,15 @@ class PropertyIndexEditor implements IndexEditor {
 
     /**
      * Retrieve a new index editor associated with the child node to process
-     * 
+     *
      * @param parent the index editor related to the parent node
-     * @param name the name of the child node
+     * @param name   the name of the child node
      * @return an instance of the PropertyIndexEditor
      */
     PropertyIndexEditor getChildIndexEditor(@Nonnull PropertyIndexEditor parent, @Nonnull String name, PathFilter.Result filterResult) {
-       return new PropertyIndexEditor(parent, name, filterResult);
+        return new PropertyIndexEditor(parent, name, filterResult);
     }
-    
+
     @Override
     public Editor childNodeAdded(String name, NodeState after) {
         PathFilter.Result filterResult = getPathFilterResult(name);
@@ -446,7 +472,7 @@ class PropertyIndexEditor implements IndexEditor {
         return pathFilter.filter(getPath());
     }
 
-    private PathFilter.Result getPathFilterResult(String childNodeName) {
+    protected PathFilter.Result getPathFilterResult(String childNodeName) {
         return pathFilter.filter(concat(getPath(), childNodeName));
     }
 }

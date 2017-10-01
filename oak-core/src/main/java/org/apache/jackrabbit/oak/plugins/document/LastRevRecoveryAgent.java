@@ -583,6 +583,16 @@ public class LastRevRecoveryAgent {
             return clusterId;
         }
 
+        @Override
+        public Integer getSlidingWindowLength() {
+            return context.getSlidingWindowLength();
+        }
+
+        @Override
+        public Integer getVolatilityThreshold() {
+            return context.getVolatilityThreshold();
+        }
+
         @Nonnull
         @Override
         public RevisionVector getHeadRevision() {

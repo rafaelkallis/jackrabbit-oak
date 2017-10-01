@@ -42,6 +42,10 @@ public interface RevisionContext {
      */
     int getClusterId();
 
+    Integer getSlidingWindowLength();
+
+    Integer getVolatilityThreshold();
+
     /**
      * @return the current head revision.
      */

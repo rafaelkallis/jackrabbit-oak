@@ -22,6 +22,7 @@ import org.apache.felix.scr.annotations.Component;
 import org.apache.felix.scr.annotations.Property;
 import org.apache.felix.scr.annotations.Reference;
 import org.apache.felix.scr.annotations.Service;
+import org.apache.jackrabbit.oak.plugins.document.DocumentNodeStore;
 import org.apache.jackrabbit.oak.plugins.index.IndexConstants;
 import org.apache.jackrabbit.oak.plugins.index.IndexEditorProvider;
 import org.apache.jackrabbit.oak.spi.commit.Editor;
@@ -48,17 +49,28 @@ public class PropertyIndexEditorProvider implements IndexEditorProvider {
     @Reference
     private MountInfoProvider mountInfoProvider = Mounts.defaultMountInfoProvider();
 
+    private DocumentNodeStore documentNodeStore = null;
+
     @Override
     public Editor getIndexEditor(
             @Nonnull String type, @Nonnull NodeBuilder definition, @Nonnull NodeState root, @Nonnull IndexUpdateCallback callback) {
-        if (TYPE.equals(type)) {
-            return new PropertyIndexEditor(definition, root, callback, mountInfoProvider);
+        if (
+                TYPE.equals(type)
+                        && documentNodeStore != null
+                        && documentNodeStore.getVolatilityThreshold() != null
+                        && documentNodeStore.getSlidingWindowLength() != null) {
+            return new PropertyIndexEditor(definition, root, callback, mountInfoProvider, this.documentNodeStore);
         }
         return null;
     }
 
     public PropertyIndexEditorProvider with(MountInfoProvider mountInfoProvider) {
         this.mountInfoProvider = mountInfoProvider;
+        return this;
+    }
+
+    public PropertyIndexEditorProvider with(DocumentNodeStore documentNodeStore) {
+        this.documentNodeStore = documentNodeStore;
         return this;
     }
 }

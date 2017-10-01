@@ -409,6 +409,18 @@ public final class DocumentNodeStore
     private ClusterStateChangeListener clusterStateChangeListener;
 
     /**
+     *
+     */
+    private final Integer volatilityThreshold;
+
+    /**
+     *
+     */
+    private final Integer slidingWindowLength;
+
+
+
+    /**
      * The BlobSerializer.
      */
     private final BlobSerializer blobSerializer = new BlobSerializer() {
@@ -710,8 +722,17 @@ public final class DocumentNodeStore
         if (!builder.isBundlingDisabled()) {
             bundlingConfigHandler.initialize(this, executor);
         }
+        this.volatilityThreshold = builder.getVolatilityThreshold();
+        this.slidingWindowLength = builder.getSlidingWindowLength();
     }
 
+    public Integer getVolatilityThreshold() {
+        return volatilityThreshold;
+    }
+
+    public Integer getSlidingWindowLength() {
+        return slidingWindowLength;
+    }
 
     /**
      * Recover _lastRev recovery if needed.

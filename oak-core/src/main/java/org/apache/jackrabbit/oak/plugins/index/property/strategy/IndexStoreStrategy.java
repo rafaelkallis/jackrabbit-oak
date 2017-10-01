@@ -24,6 +24,9 @@ import org.apache.jackrabbit.oak.spi.query.Filter;
 import org.apache.jackrabbit.oak.spi.state.NodeBuilder;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
 
+import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
+
 /**
  * Strategy that defines how the index content will be actually stored under the
  * index node
@@ -41,9 +44,12 @@ public interface IndexStoreStrategy {
      * @param afterKeys keys that now do apply to the path
      */
     void update(
-            Supplier<NodeBuilder> index, String path,
-            String indexName, NodeBuilder indexMeta,
-            Set<String> beforeKeys, Set<String> afterKeys) throws CommitFailedException;
+            Supplier<NodeBuilder> index,
+            String path,
+            @Nullable String indexName,
+            @Nullable NodeBuilder indexMeta,
+            Set<String> beforeKeys,
+            Set<String> afterKeys) throws CommitFailedException;
 
     /**
      * Check whether an entry for the given key exists.

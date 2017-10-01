@@ -38,7 +38,6 @@ import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.collect.Iterables.any;
 import static com.google.common.collect.Iterables.transform;
 import static com.google.common.collect.Sets.filter;
-import static com.rafaelkallis.WAPI.*;
 import static org.apache.jackrabbit.oak.plugins.document.NodeDocument.*;
 import static org.apache.jackrabbit.oak.plugins.document.util.Utils.*;
 
@@ -58,11 +57,11 @@ class SplitOperations {
     };
     private static final DocumentStore STORE = new MemoryDocumentStore();
 
-    private final NodeDocument doc;
+    protected final NodeDocument doc;
     private final String path;
     private final String id;
     private final Revision headRevision;
-    private final RevisionContext context;
+    protected final RevisionContext context;
     private final Function<String, Long> binarySize;
     private final int numRevsThreshold;
     private Revision high;
@@ -79,11 +78,11 @@ class SplitOperations {
     private List<UpdateOp> splitOps;
     private UpdateOp main;
 
-    private SplitOperations(@Nonnull final NodeDocument doc,
-                            @Nonnull final RevisionContext context,
-                            @Nonnull final RevisionVector headRev,
-                            @Nonnull final Function<String, Long> binarySize,
-                            int numRevsThreshold) {
+    protected SplitOperations(@Nonnull final NodeDocument doc,
+                              @Nonnull final RevisionContext context,
+                              @Nonnull final RevisionVector headRev,
+                              @Nonnull final Function<String, Long> binarySize,
+                              int numRevsThreshold) {
         this.doc = checkNotNull(doc);
         this.context = checkNotNull(context);
         this.binarySize = checkNotNull(binarySize);
@@ -109,15 +108,15 @@ class SplitOperations {
      * document store. This is important in order to maintain consistency.
      * See OAK-3081 for details.
      *
-     * @param doc a main document.
-     * @param context the revision context.
-     * @param headRevision the head revision before the document was retrieved
-     *                     from the document store.
-     * @param binarySize a function that returns the binary size of the given
-     *                   JSON property value String.
+     * @param doc              a main document.
+     * @param context          the revision context.
+     * @param headRevision     the head revision before the document was retrieved
+     *                         from the document store.
+     * @param binarySize       a function that returns the binary size of the given
+     *                         JSON property value String.
      * @param numRevsThreshold only split off at least this number of revisions.
      * @return list of update operations. An empty list indicates the document
-     *          does not require a split.
+     * does not require a split.
      * @throws IllegalArgumentException if the given document is a split
      *                                  document.
      */
@@ -136,7 +135,7 @@ class SplitOperations {
 
     }
 
-    private List<UpdateOp> create() {
+    protected List<UpdateOp> create() {
         if (!considerSplit()) {
             return Collections.emptyList();
         }
@@ -146,7 +145,7 @@ class SplitOperations {
         garbage = Maps.newHashMap();
         changes = Sets.newHashSet();
         committedChanges = Maps.newHashMap();
-        
+
         collectLocalChanges(committedChanges, changes);
 
         // revisions of the most recent committed changes on this document
@@ -165,7 +164,7 @@ class SplitOperations {
 
         // remove stale references to previous docs
         disconnectStalePrevDocs();
-        
+
         // remove garbage
         removeGarbage();
 
@@ -255,7 +254,7 @@ class SplitOperations {
             if (splitRevs.contains(r)) {
                 commitRoot.put(r, entry.getValue());
                 numValues++;
-            } else if (r.getClusterId() == context.getClusterId() 
+            } else if (r.getClusterId() == context.getClusterId()
                     && !changes.contains(r)) {
                 // OAK-2528: _commitRoot entry without associated change
                 // consider all but most recent as garbage (OAK-3333, OAK-4050)
@@ -319,7 +318,7 @@ class SplitOperations {
      * added to the list but rather returned.
      *
      * @return the UpdateOp for the main document or {@code null} if there is
-     *          not enough data to split.
+     * not enough data to split.
      */
     @CheckForNull
     private UpdateOp createSplitOps() {
@@ -405,51 +404,36 @@ class SplitOperations {
     /**
      * Collects all local property changes committed by the current
      * cluster node.
+     *
      * @param committedLocally local changes committed by the current cluster node.
-     * @param changes all revisions of local changes (committed and uncommitted).
+     * @param changes          all revisions of local changes (committed and uncommitted).
      */
-    private void collectLocalChanges(
+    protected void collectLocalChanges(
             Map<String, NavigableMap<Revision, String>> committedLocally,
             Set<Revision> changes) {
-
-        // for each public property or "_deleted"
         for (String property : filter(doc.keySet(), PROPERTY_OR_DELETED)) {
             NavigableMap<Revision, String> splitMap =
                     new TreeMap<Revision, String>(StableRevisionComparator.INSTANCE);
             committedLocally.put(property, splitMap);
-
             // local property revisions
             Map<Revision, String> valueMap = doc.getLocalMap(property);
-
-            int count = 0;
-
             // collect committed changes of this cluster node
             for (Map.Entry<Revision, String> entry : valueMap.entrySet()) {
                 Revision rev = entry.getKey();
-
-                if (isWorkloadAware() && property.equals("_deleted")) {
-                    if (!isVisible(rev)){
-                        continue;
-                    }
-
-                    if (++count <= getVolatilityThreshold() && isInSlidingWindow(rev)){
-                        continue;
-                    }
+                if (rev.getClusterId() != context.getClusterId()) {
+                    continue;
                 }
-
-                if (rev.getClusterId() == context.getClusterId()) {
-                    changes.add(rev);
-                    if (isCommitted(context.getCommitValue(rev, doc))) {
-                        splitMap.put(rev, entry.getValue());
-                    } else if (isGarbage(rev)) {
-                        addGarbage(rev, property);
-                    }
+                changes.add(rev);
+                if (isCommitted(context.getCommitValue(rev, doc))) {
+                    splitMap.put(rev, entry.getValue());
+                } else if (isGarbage(rev)) {
+                    addGarbage(rev, property);
                 }
             }
         }
     }
-    
-    private boolean isGarbage(Revision rev) {
+
+    protected boolean isGarbage(Revision rev) {
         // use headRevision as passed in the constructor instead
         // of the head revision from the RevisionContext. see OAK-3081
         if (headRevision.compareRevisionTime(rev) <= 0) {
@@ -459,8 +443,8 @@ class SplitOperations {
         // garbage if not part of an active branch
         return context.getBranches().getBranchCommit(rev) == null;
     }
-    
-    private void addGarbage(Revision rev, String property) {
+
+    protected void addGarbage(Revision rev, String property) {
         if (garbageCount > GARBAGE_LIMIT) {
             return;
         }
@@ -508,7 +492,7 @@ class SplitOperations {
 
         }
     }
-    
+
     private void removeGarbage() {
         if (garbage.isEmpty()) {
             return;
@@ -543,9 +527,9 @@ class SplitOperations {
      * Set various split document related flag/properties
      *
      * @param mainDoc main document from which split document is being created
-     * @param old updateOp of the old document created via split
-     * @param oldDoc old document created via split
-     * @param maxRev max revision stored in the split document oldDoc
+     * @param old     updateOp of the old document created via split
+     * @param oldDoc  old document created via split
+     * @param maxRev  max revision stored in the split document oldDoc
      */
     private static void setSplitDocProps(NodeDocument mainDoc, NodeDocument oldDoc,
                                          UpdateOp old, Revision maxRev) {
@@ -572,7 +556,7 @@ class SplitOperations {
      * Set various properties for intermediate split document
      *
      * @param intermediate updateOp of the intermediate doc getting created
-     * @param maxRev max revision stored in the intermediate
+     * @param maxRev       max revision stored in the intermediate
      */
     private static void setIntermediateDocProps(UpdateOp intermediate, Revision maxRev) {
         setSplitDocMaxRev(intermediate, maxRev);

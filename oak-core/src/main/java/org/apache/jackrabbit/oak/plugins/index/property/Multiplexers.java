@@ -55,8 +55,9 @@ public class Multiplexers {
             INDEX_CONTENT_NODE_NAME);
 
     /** Index storage strategy */
-    private static final IndexStoreStrategy MIRROR = new ContentMirrorStoreStrategy(
-            INDEX_CONTENT_NODE_NAME);
+//    private static final IndexStoreStrategy MIRROR = new ContentMirrorStoreStrategy(
+//            INDEX_CONTENT_NODE_NAME);
+    private static final IndexStoreStrategy MIRROR = null;
 
     public static Set<IndexStoreStrategy> getStrategies(boolean unique,
             MountInfoProvider mountInfoProvider, NodeBuilder definition,
@@ -75,6 +76,7 @@ public class Multiplexers {
     private static Set<IndexStoreStrategy> getStrategies(boolean unique,
             MountInfoProvider mountInfoProvider, Iterable<String> children,
             String defaultName) {
+        System.err.println("Multiplexers.getStrategies()");
         if (mountInfoProvider.hasNonDefaultMounts()) {
             Set<String> names = new HashSet<String>();
             // TODO should this be collected from the index def?
@@ -118,7 +120,9 @@ public class Multiplexers {
         if (INDEX_CONTENT_NODE_NAME.equals(defaultName)) {
             return MIRROR;
         } else {
-            return new ContentMirrorStoreStrategy(defaultName);
+            // TODO
+//            return new ContentMirrorStoreStrategy(defaultName);
+            return null;
         }
     }
 
@@ -129,7 +133,10 @@ public class Multiplexers {
         return unique ? new FilteringIndexStoreStrategy(
                 new UniqueEntryStoreStrategy(name), filter, readOnly)
                 : new FilteringIndexStoreStrategy(
-                        new ContentMirrorStoreStrategy(name), filter);
+                        // TODO
+//                        new ContentMirrorStoreStrategy(name)
+                null
+                        , filter);
     }
 
     private static Predicate<String> newFilter(final Mount m) {

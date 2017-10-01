@@ -1097,6 +1097,16 @@ public class DocumentSplitTest extends BaseDocumentMKTest {
             return rc.getClusterId();
         }
 
+        @Override
+        public int getSlidingWindowLength() {
+            return 0;
+        }
+
+        @Override
+        public int getVolatilityThreshold() {
+            return Integer.MAX_VALUE;
+        }
+
         @Nonnull
         @Override
         public RevisionVector getHeadRevision() {

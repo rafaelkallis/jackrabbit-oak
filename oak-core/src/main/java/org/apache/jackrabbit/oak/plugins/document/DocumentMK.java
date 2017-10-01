@@ -607,7 +607,28 @@ public class DocumentMK {
         private GCMonitor gcMonitor = new LoggingGCMonitor(
                 LoggerFactory.getLogger(VersionGarbageCollector.class));
 
+        private Integer volatilityThreshold = null;
+        private Integer slidingWindowLength = null;
+
         public Builder() {
+        }
+
+        public Builder setVolatilityThreshold(int volatilityThreshold) {
+            this.volatilityThreshold = volatilityThreshold;
+            return this;
+        }
+
+        public Builder setSlidingWindowLength(int slidingWindowLength) {
+            this.slidingWindowLength = slidingWindowLength;
+            return this;
+        }
+
+        public Integer getVolatilityThreshold() {
+            return volatilityThreshold;
+        }
+
+        public Integer getSlidingWindowLength() {
+            return slidingWindowLength;
         }
 
         /**
