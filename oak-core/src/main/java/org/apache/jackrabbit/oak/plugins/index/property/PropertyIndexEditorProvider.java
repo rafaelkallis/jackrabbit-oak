@@ -49,28 +49,17 @@ public class PropertyIndexEditorProvider implements IndexEditorProvider {
     @Reference
     private MountInfoProvider mountInfoProvider = Mounts.defaultMountInfoProvider();
 
-    private DocumentNodeStore documentNodeStore = null;
-
     @Override
     public Editor getIndexEditor(
             @Nonnull String type, @Nonnull NodeBuilder definition, @Nonnull NodeState root, @Nonnull IndexUpdateCallback callback) {
-        if (
-                TYPE.equals(type)
-                        && documentNodeStore != null
-                        && documentNodeStore.getVolatilityThreshold() != null
-                        && documentNodeStore.getSlidingWindowLength() != null) {
-            return new PropertyIndexEditor(definition, root, callback, mountInfoProvider, this.documentNodeStore);
+        if (TYPE.equals(type)) {
+            return new PropertyIndexEditor(definition, root, callback, mountInfoProvider);
         }
         return null;
     }
 
     public PropertyIndexEditorProvider with(MountInfoProvider mountInfoProvider) {
         this.mountInfoProvider = mountInfoProvider;
-        return this;
-    }
-
-    public PropertyIndexEditorProvider with(DocumentNodeStore documentNodeStore) {
-        this.documentNodeStore = documentNodeStore;
         return this;
     }
 }

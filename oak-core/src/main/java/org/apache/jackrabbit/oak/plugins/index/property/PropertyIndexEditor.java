@@ -129,19 +129,15 @@ class PropertyIndexEditor implements IndexEditor {
 
     private final MountInfoProvider mountInfoProvider;
 
-    private final DocumentNodeStore documentNodeStore;
-
     public PropertyIndexEditor(NodeBuilder definition,
                                NodeState root,
                                IndexUpdateCallback updateCallback,
-                               MountInfoProvider mountInfoProvider,
-                               DocumentNodeStore documentNodeStore) {
+                               MountInfoProvider mountInfoProvider) {
         this.parent = null;
         this.name = null;
         this.path = "/";
         this.definition = definition;
         this.root = root;
-        this.documentNodeStore = documentNodeStore;
         pathFilter = PathFilter.from(definition);
         pathFilterResult = getPathFilterResult();
 
@@ -190,7 +186,6 @@ class PropertyIndexEditor implements IndexEditor {
         this.pathFilter = parent.pathFilter;
         this.pathFilterResult = pathFilterResult;
         this.mountInfoProvider = parent.mountInfoProvider;
-        this.documentNodeStore = parent.documentNodeStore;
     }
 
     /**
@@ -247,10 +242,8 @@ class PropertyIndexEditor implements IndexEditor {
     }
 
     private Set<IndexStoreStrategy> getStrategies(boolean unique) {
-        // TODO
-//        return Multiplexers.getStrategies(unique, mountInfoProvider,
-//                definition, INDEX_CONTENT_NODE_NAME);
-        return ImmutableSet.of(new ContentMirrorStoreStrategy(this.documentNodeStore));
+        return Multiplexers.getStrategies(unique, mountInfoProvider,
+                definition, INDEX_CONTENT_NODE_NAME);
     }
 
     @Override

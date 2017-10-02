@@ -67,7 +67,7 @@ import static org.apache.jackrabbit.oak.commons.StringUtils.estimateMemoryUsage;
 /**
  * A {@link NodeState} implementation for the {@link DocumentNodeStore}.
  */
-public class DocumentNodeState extends AbstractDocumentNodeState implements CacheValue {
+public class DocumentNodeState extends AbstractDocumentNodeState implements CacheValue, WorkloadAware {
 
     private static final Logger log = LoggerFactory.getLogger(DocumentNodeState.class);
 
@@ -137,6 +137,45 @@ public class DocumentNodeState extends AbstractDocumentNodeState implements Cach
         this.hasChildren = bundlingContext.hasChildren();
     }
 
+    @Override
+    public boolean isVolatile() {
+        log.debug("checking if " + path + " is volatile");
+        log.debug("tau = " + this.store.getVolatilityThreshold());
+        log.debug("L = " + this.store.getSlidingWindowLength());
+        int vol = 0;
+
+        final NodeDocument nodeDocument = store.getDocumentStore().find(Collection.NODES, keyFromAbsPath(path));
+        for (Revision r : nodeDocument.getLocalDeleted().keySet()) {
+            if (!isInSlidingWindow(r)) {
+                break;
+            }
+            if (!isVisible(r)) {
+                continue;
+            }
+            log.debug("vol = " + new Integer(vol + 1));
+            if (vol++ >= store.getVolatilityThreshold()) {
+                break;
+            }
+        }
+        log.debug("isVolatile = " + new Boolean(vol >= this.store.getVolatilityThreshold()));
+        return vol >= store.getVolatilityThreshold();
+    }
+
+    private static String keyFromAbsPath(final String absPath) {
+        return PathUtils.getDepth(absPath) + ":" + absPath;
+    }
+
+
+    private boolean isVisible(Revision r) {
+        int clusterId = store.getClusterId();
+        return r.getClusterId() == clusterId
+                || (r.compareRevisionTimeThenClusterId(store.getHeadRevision().getRevision(clusterId)) < 0);
+    }
+
+    private boolean isInSlidingWindow(Revision r) {
+        return System.currentTimeMillis() - store.getSlidingWindowLength() < r.getTimestamp();
+    }
+
     /**
      * Creates a copy of this {@code DocumentNodeState} with the
      * {@link #rootRevision} set to the given {@code root} revision. This method
@@ -144,15 +183,15 @@ public class DocumentNodeState extends AbstractDocumentNodeState implements Cach
      * the same as the one in this instance and the {@link #fromExternalChange}
      * flags are equal.
      *
-     * @param root the root revision for the copy of this node state.
+     * @param root           the root revision for the copy of this node state.
      * @param externalChange if the {@link #fromExternalChange} flag must be
      *                       set on the returned node state.
      * @return a copy of this node state with the given root revision and
-     *          external change flag.
+     * external change flag.
      */
     @Override
     public DocumentNodeState withRootRevision(@Nonnull RevisionVector root,
-                                               boolean externalChange) {
+                                              boolean externalChange) {
         if (rootRevision.equals(root) && fromExternalChange == externalChange) {
             return this;
         } else {
@@ -162,7 +201,7 @@ public class DocumentNodeState extends AbstractDocumentNodeState implements Cach
 
     /**
      * @return a copy of this {@code DocumentNodeState} with the
-     *          {@link #fromExternalChange} flag set to {@code true}.
+     * {@link #fromExternalChange} flag set to {@code true}.
      */
     @Nonnull
     public DocumentNodeState fromExternalChange() {
@@ -171,7 +210,7 @@ public class DocumentNodeState extends AbstractDocumentNodeState implements Cach
 
     /**
      * @return {@code true} if this node state was created as a result of an
-     *          external change; {@code false} otherwise.
+     * external change; {@code false} otherwise.
      */
     @Override
     public boolean isFromExternalChange() {
@@ -226,7 +265,7 @@ public class DocumentNodeState extends AbstractDocumentNodeState implements Cach
     public Iterable<? extends PropertyState> getProperties() {
         //Filter out the meta properties related to bundling from
         //generic listing of props
-        if (bundlingContext.isBundled()){
+        if (bundlingContext.isBundled()) {
             return Iterables.filter(properties.values(), BundlorUtils.NOT_BUNDLOR_PROPS);
         }
         return properties.values();
@@ -264,7 +303,7 @@ public class DocumentNodeState extends AbstractDocumentNodeState implements Cach
         }
 
         int bundledChildCount = bundlingContext.getBundledChildNodeNames().size();
-        if (bundlingContext.hasOnlyBundledChildren()){
+        if (bundlingContext.hasOnlyBundledChildren()) {
             return bundledChildCount;
         }
 
@@ -283,7 +322,7 @@ public class DocumentNodeState extends AbstractDocumentNodeState implements Cach
 
     @Override
     public long getPropertyCount() {
-        if (bundlingContext.isBundled()){
+        if (bundlingContext.isBundled()) {
             return Iterables.size(getProperties());
         }
         return properties.size();
@@ -297,7 +336,7 @@ public class DocumentNodeState extends AbstractDocumentNodeState implements Cach
         }
 
         AbstractDocumentNodeState secondaryState = getSecondaryNodeState();
-        if (secondaryState != null){
+        if (secondaryState != null) {
             return secondaryState.getChildNodeEntries();
         }
 
@@ -306,7 +345,7 @@ public class DocumentNodeState extends AbstractDocumentNodeState implements Cach
             public Iterator<ChildNodeEntry> iterator() {
                 if (bundlingContext.isBundled()) {
                     //If all the children are bundled
-                    if (bundlingContext.hasOnlyBundledChildren()){
+                    if (bundlingContext.hasOnlyBundledChildren()) {
                         return getBundledChildren();
                     }
                     return Iterators.concat(getBundledChildren(), new ChildNodeEntryIterator());
@@ -349,12 +388,12 @@ public class DocumentNodeState extends AbstractDocumentNodeState implements Cach
         }
     }
 
-    public Set<String> getBundledChildNodeNames(){
+    public Set<String> getBundledChildNodeNames() {
         return bundlingContext.getBundledChildNodeNames();
     }
 
-    public boolean hasOnlyBundledChildren(){
-        if (bundlingContext.isBundled()){
+    public boolean hasOnlyBundledChildren() {
+        if (bundlingContext.isBundled()) {
             return bundlingContext.hasOnlyBundledChildren();
         }
         return false;
@@ -449,7 +488,7 @@ public class DocumentNodeState extends AbstractDocumentNodeState implements Cach
                 // referencing the binary in the blob store
                 // double the size because the parsed PropertyState
                 // will have a similarly sized blobId as well
-                size += (long)estimateMemoryUsage(asString(entry.getValue())) * 2;
+                size += (long) estimateMemoryUsage(asString(entry.getValue())) * 2;
             }
         }
         if (size > Integer.MAX_VALUE) {
@@ -460,33 +499,33 @@ public class DocumentNodeState extends AbstractDocumentNodeState implements Cach
     }
 
     public Iterable<DocumentNodeState> getAllBundledNodesStates() {
-        return new TreeTraverser<DocumentNodeState>(){
+        return new TreeTraverser<DocumentNodeState>() {
             @Override
             public Iterable<DocumentNodeState> children(DocumentNodeState root) {
-                return Iterables.transform(() -> root.getBundledChildren(), ce -> (DocumentNodeState)ce.getNodeState());
+                return Iterables.transform(() -> root.getBundledChildren(), ce -> (DocumentNodeState) ce.getNodeState());
             }
         }.preOrderTraversal(this)
-         .filter(dns -> !dns.getPath().equals(this.getPath()) ); //Exclude this
+                .filter(dns -> !dns.getPath().equals(this.getPath())); //Exclude this
     }
 
     //------------------------------< internal >--------------------------------
 
     @CheckForNull
-    private AbstractDocumentNodeState getChildNodeDoc(String childNodeName){
+    private AbstractDocumentNodeState getChildNodeDoc(String childNodeName) {
         AbstractDocumentNodeState secondaryState = getSecondaryNodeState();
-        if (secondaryState != null){
+        if (secondaryState != null) {
             NodeState result = secondaryState.getChildNode(childNodeName);
             //If given child node exist then cast it and return
             //else return null
-            if (result.exists()){
+            if (result.exists()) {
                 return (AbstractDocumentNodeState) result;
             }
             return null;
         }
 
         Matcher child = bundlingContext.matcher.next(childNodeName);
-        if (child.isMatch()){
-            if (bundlingContext.hasChildNode(child.getMatchedPath())){
+        if (child.isMatch()) {
+            if (bundlingContext.hasChildNode(child.getMatchedPath())) {
                 return createBundledState(childNodeName, child);
             } else {
                 return null;
@@ -497,8 +536,8 @@ public class DocumentNodeState extends AbstractDocumentNodeState implements Cach
     }
 
     @CheckForNull
-    private AbstractDocumentNodeState getSecondaryNodeState(){
-        if (cachedSecondaryState == null){
+    private AbstractDocumentNodeState getSecondaryNodeState() {
+        if (cachedSecondaryState == null) {
             cachedSecondaryState = store.getSecondaryNodeState(getPath(), rootRevision, lastRevision);
         }
         return cachedSecondaryState;
@@ -509,9 +548,9 @@ public class DocumentNodeState extends AbstractDocumentNodeState implements Cach
      * Returns up to {@code limit} child node entries, starting after the given
      * {@code name}.
      *
-     * @param name the name of the lower bound child node entry (exclusive) or
-     *             {@code null}, if the method should start with the first known
-     *             child node.
+     * @param name  the name of the lower bound child node entry (exclusive) or
+     *              {@code null}, if the method should start with the first known
+     *              child node.
      * @param limit the maximum number of child node entries to return.
      * @return the child node entries.
      */
@@ -539,9 +578,9 @@ public class DocumentNodeState extends AbstractDocumentNodeState implements Cach
         });
     }
 
-    private static Map<String, PropertyState> asMap(Iterable<? extends PropertyState> props){
+    private static Map<String, PropertyState> asMap(Iterable<? extends PropertyState> props) {
         ImmutableMap.Builder<String, PropertyState> builder = ImmutableMap.builder();
-        for (PropertyState ps : props){
+        for (PropertyState ps : props) {
             builder.put(ps.getName(), ps);
         }
         return builder.build();
@@ -566,7 +605,7 @@ public class DocumentNodeState extends AbstractDocumentNodeState implements Cach
         }
         return json.toString();
     }
-    
+
     public static DocumentNodeState fromString(DocumentNodeStore store, String s) {
         JsopTokenizer json = new JsopTokenizer(s);
         String path = null;
@@ -632,7 +671,7 @@ public class DocumentNodeState extends AbstractDocumentNodeState implements Cach
                 if (!children.isEmpty()) {
                     size = 114;
                     for (String c : children) {
-                        size += (long)estimateMemoryUsage(c) + 8;
+                        size += (long) estimateMemoryUsage(c) + 8;
                     }
                 }
                 cachedMemory = size;
@@ -641,7 +680,7 @@ public class DocumentNodeState extends AbstractDocumentNodeState implements Cach
                 log.debug("Estimated memory footprint larger than Integer.MAX_VALUE: {}.", cachedMemory);
                 return Integer.MAX_VALUE;
             } else {
-                return (int)cachedMemory;
+                return (int) cachedMemory;
             }
         }
 
@@ -662,9 +701,9 @@ public class DocumentNodeState extends AbstractDocumentNodeState implements Cach
                 }
                 json.endArray();
             }
-            return json.toString();            
+            return json.toString();
         }
-        
+
         public static Children fromString(String s) {
             JsopTokenizer json = new JsopTokenizer(s);
             Children children = new Children();
@@ -692,9 +731,9 @@ public class DocumentNodeState extends AbstractDocumentNodeState implements Cach
                 }
                 json.read(',');
             }
-            return children;            
+            return children;
         }
-        
+
     }
 
     private class ChildNodeEntryIterator implements Iterator<ChildNodeEntry> {
@@ -764,26 +803,26 @@ public class DocumentNodeState extends AbstractDocumentNodeState implements Cach
                 bundlingContext.childContext(child));
     }
 
-    private Iterator<ChildNodeEntry> getBundledChildren(){
+    private Iterator<ChildNodeEntry> getBundledChildren() {
         return Iterators.transform(bundlingContext.getBundledChildNodeNames().iterator(),
                 new Function<String, ChildNodeEntry>() {
-            @Override
-            public ChildNodeEntry apply(final String childNodeName) {
-                return new AbstractChildNodeEntry() {
-                    @Nonnull
                     @Override
-                    public String getName() {
-                        return childNodeName;
-                    }
+                    public ChildNodeEntry apply(final String childNodeName) {
+                        return new AbstractChildNodeEntry() {
+                            @Nonnull
+                            @Override
+                            public String getName() {
+                                return childNodeName;
+                            }
 
-                    @Nonnull
-                    @Override
-                    public NodeState getNodeState() {
-                        return createBundledState(childNodeName, bundlingContext.matcher.next(childNodeName));
+                            @Nonnull
+                            @Override
+                            public NodeState getNodeState() {
+                                return createBundledState(childNodeName, bundlingContext.matcher.next(childNodeName));
+                            }
+                        };
                     }
-                };
-            }
-        });
+                });
     }
 
     private static BundlingContext createBundlingContext(Map<String, PropertyState> properties,
@@ -791,14 +830,14 @@ public class DocumentNodeState extends AbstractDocumentNodeState implements Cach
         PropertyState bundlorConfig = properties.get(DocumentBundlor.META_PROP_PATTERN);
         Matcher matcher = Matcher.NON_MATCHING;
         boolean hasBundledChildren = false;
-        if (bundlorConfig != null){
+        if (bundlorConfig != null) {
             matcher = DocumentBundlor.from(bundlorConfig).createMatcher();
             hasBundledChildren = hasBundledProperty(properties, matcher, DocumentBundlor.META_PROP_BUNDLED_CHILD);
         }
         return new BundlingContext(matcher, properties, hasBundledChildren, hasNonBundledChildren);
     }
 
-    private static boolean hasBundledProperty(Map<String, PropertyState> props, Matcher matcher, String propName){
+    private static boolean hasBundledProperty(Map<String, PropertyState> props, Matcher matcher, String propName) {
         String key = concat(matcher.getMatchedPath(), propName);
         return props.containsKey(key);
     }
@@ -817,55 +856,55 @@ public class DocumentNodeState extends AbstractDocumentNodeState implements Cach
             this.hasNonBundledChildren = hasNonBundledChildren;
         }
 
-        public BundlingContext childContext(Matcher childMatcher){
+        public BundlingContext childContext(Matcher childMatcher) {
             return new BundlingContext(childMatcher, rootProperties,
                     hasBundledChildren(childMatcher), hasNonBundledChildren(childMatcher));
         }
 
-        public Map<String, PropertyState> getProperties(){
-            if (matcher.isMatch()){
+        public Map<String, PropertyState> getProperties() {
+            if (matcher.isMatch()) {
                 return BundlorUtils.getMatchingProperties(rootProperties, matcher);
             }
             return rootProperties;
         }
 
-        public boolean isBundled(){
+        public boolean isBundled() {
             return matcher.isMatch();
         }
 
-        public Map<String, PropertyState> getAllProperties(){
+        public Map<String, PropertyState> getAllProperties() {
             return rootProperties;
         }
 
-        public boolean hasChildNode(String relativePath){
+        public boolean hasChildNode(String relativePath) {
             String key = concat(relativePath, DocumentBundlor.META_PROP_BUNDLING_PATH);
             return rootProperties.containsKey(key);
         }
 
-        public boolean hasChildren(){
+        public boolean hasChildren() {
             return hasNonBundledChildren || hasBundledChildren;
         }
 
-        public boolean hasOnlyBundledChildren(){
+        public boolean hasOnlyBundledChildren() {
             return !hasNonBundledChildren;
         }
 
-        public Set<String> getBundledChildNodeNames(){
+        public Set<String> getBundledChildNodeNames() {
             if (isBundled()) {
                 return BundlorUtils.getChildNodeNames(rootProperties.keySet(), matcher);
             }
             return Collections.emptySet();
         }
 
-        private boolean hasBundledChildren(Matcher matcher){
-            if (isBundled()){
+        private boolean hasBundledChildren(Matcher matcher) {
+            if (isBundled()) {
                 return hasBundledProperty(rootProperties, matcher, DocumentBundlor.META_PROP_BUNDLED_CHILD);
             }
             return false;
         }
 
-        private boolean hasNonBundledChildren(Matcher matcher){
-            if (isBundled()){
+        private boolean hasNonBundledChildren(Matcher matcher) {
+            if (isBundled()) {
                 return hasBundledProperty(rootProperties, matcher, DocumentBundlor.META_PROP_NON_BUNDLED_CHILD);
             }
             return false;

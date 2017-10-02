@@ -55,9 +55,8 @@ public class Multiplexers {
             INDEX_CONTENT_NODE_NAME);
 
     /** Index storage strategy */
-//    private static final IndexStoreStrategy MIRROR = new ContentMirrorStoreStrategy(
-//            INDEX_CONTENT_NODE_NAME);
-    private static final IndexStoreStrategy MIRROR = null;
+    private static final IndexStoreStrategy MIRROR = new ContentMirrorStoreStrategy(
+            INDEX_CONTENT_NODE_NAME);
 
     public static Set<IndexStoreStrategy> getStrategies(boolean unique,
             MountInfoProvider mountInfoProvider, NodeBuilder definition,
@@ -76,7 +75,6 @@ public class Multiplexers {
     private static Set<IndexStoreStrategy> getStrategies(boolean unique,
             MountInfoProvider mountInfoProvider, Iterable<String> children,
             String defaultName) {
-        System.err.println("Multiplexers.getStrategies()");
         if (mountInfoProvider.hasNonDefaultMounts()) {
             Set<String> names = new HashSet<String>();
             // TODO should this be collected from the index def?

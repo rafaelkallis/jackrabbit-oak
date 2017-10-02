@@ -77,16 +77,14 @@ public class ContentMirrorStoreStrategy implements IndexStoreStrategy {
      */
     public static final int TRAVERSING_WARN = Integer.getInteger("oak.traversing.warn", 10000);
 
-    private final DocumentNodeStore documentNodeStore;
     private final String indexName;
 
-    public ContentMirrorStoreStrategy(@Nonnull DocumentNodeStore documentNodeStore) {
-        this(INDEX_CONTENT_NODE_NAME, documentNodeStore);
+    public ContentMirrorStoreStrategy() {
+        this(INDEX_CONTENT_NODE_NAME);
     }
 
-    public ContentMirrorStoreStrategy(@Nonnull String indexName, @Nonnull DocumentNodeStore documentNodeStore) {
+    public ContentMirrorStoreStrategy(@Nonnull String indexName) {
         this.indexName = indexName;
-        this.documentNodeStore = documentNodeStore;
     }
 
     /**
@@ -107,22 +105,29 @@ public class ContentMirrorStoreStrategy implements IndexStoreStrategy {
             Set<String> afterKeys) {
 
         for (String key : beforeKeys) {
-            if (indexMeta != null) {
-                String propertyName = indexMeta.getName(PROPERTY_NAMES);
-                if (propertyName != null) {
-                    remove(index.get(), propertyName, key, path);
-                    continue;
-                }
-            }
-            LOG.debug("legacy remove for key " + key + ", path: " + path);
-            legacyRemove(index.get(), key, path);
+            remove(index.get(), key, path);
         }
         for (String key : afterKeys) {
             insert(index.get(), key, path);
         }
     }
 
-    private void legacyRemove(final NodeBuilder index, final String key, final String path) {
+    private void legacyPrune(final Deque<NodeBuilder> builders) {
+        for (final NodeBuilder nodeBuilder : builders) {
+            if (nodeBuilder.getBoolean("match")) {
+                return;
+            }
+            if (nodeBuilder.getChildNodeCount(1) > 0) {
+                return;
+            }
+            if (!nodeBuilder.exists()) {
+                return;
+            }
+            nodeBuilder.remove();
+        }
+    }
+
+    private void remove(final NodeBuilder index, final String key, final String path) {
         ApproximateCounter.adjustCountSync(index, -1);
         NodeBuilder builder = index.getChildNode(key);
         if (builder.exists()) {
@@ -143,56 +148,6 @@ public class ContentMirrorStoreStrategy implements IndexStoreStrategy {
             NodeBuilder target = builders.peekFirst();
             if (target.exists()) {
                 target.removeProperty("match");
-            }
-
-            // Prune all index nodes that are no longer needed
-            legacyPrune(builders);
-        }
-    }
-
-    private void legacyPrune(final Deque<NodeBuilder> builders) {
-        for (final NodeBuilder nodeBuilder : builders) {
-            if (nodeBuilder.getBoolean("match")) {
-                return;
-            }
-            if (nodeBuilder.getChildNodeCount(1) > 0) {
-                return;
-            }
-            if (!nodeBuilder.exists()) {
-                return;
-            }
-            nodeBuilder.remove();
-        }
-    }
-
-    private void remove(final NodeBuilder index, final String indexName, final String key, final String path) {
-        ApproximateCounter.adjustCountSync(index, -1);
-        NodeBuilder builder = index.getChildNode(key);
-        if (builder.exists()) {
-            ApproximateCounter.adjustCountSync(builder, -1);
-
-            // Collect all builders and their absolute path along the given path
-            Deque<NodeBuilderPath> builders = newArrayDeque();
-            builders.addFirst(new NodeBuilderPath(
-                    builder,
-                    PathUtils.concat("/" + INDEX_DEFINITIONS_NAME, indexName, INDEX_CONTENT_NODE_NAME, key)
-            ));
-
-            // Descend to the correct location in the index tree
-            for (String name : PathUtils.elements(path)) {
-                NodeBuilderPath parent = builders.peekFirst();
-                NodeBuilder childNodeBuilder = parent.nodeBuilder.getChildNode(name);
-                String childPath = PathUtils.concat(parent.path, name);
-                builders.addFirst(new NodeBuilderPath(
-                        childNodeBuilder,
-                        childPath
-                ));
-            }
-
-            // Drop the match value, if present
-            NodeBuilderPath target = builders.peekFirst();
-            if (target.nodeBuilder.exists()) {
-                target.nodeBuilder.removeProperty("match");
             }
 
             // Prune all index nodes that are no longer needed
@@ -639,10 +594,8 @@ public class ContentMirrorStoreStrategy implements IndexStoreStrategy {
      *
      * @param builders list of nodes to prune
      */
-    private void prune(final Deque<NodeBuilderPath> builders) {
-        for (final NodeBuilderPath nodeBuilderPath : builders) {
-            NodeBuilder nodeBuilder = nodeBuilderPath.nodeBuilder;
-            String path = nodeBuilderPath.path;
+    private void prune(final Deque<NodeBuilder> builders) {
+        for (final NodeBuilder nodeBuilder: builders) {
             if (nodeBuilder.getBoolean("match")) {
                 return;
             }
@@ -652,53 +605,15 @@ public class ContentMirrorStoreStrategy implements IndexStoreStrategy {
             if (!nodeBuilder.exists()) {
                 return;
             }
-            if (isVolatile(getDocument(path))) {
-                return;
+            try {
+                if (((DocumentNodeState) nodeBuilder.getBaseState()).isVolatile()) {
+                    return;
+                }
+            } catch (ClassCastException ignored) {
+                LOG.debug("node does not have a corresponding document node");
             }
             nodeBuilder.remove();
         }
-    }
-
-    private NodeDocument getDocument(final String absPath) {
-        return this.documentNodeStore.getDocumentStore().find(Collection.NODES, keyFromAbsPath(absPath));
-    }
-
-    private String keyFromAbsPath(final String absPath) {
-        LOG.debug("absPath: " + absPath);
-        String key = PathUtils.getDepth(absPath) + ":" + absPath;
-        LOG.debug("key: " + key);
-        return key;
-    }
-
-    private boolean isVolatile(final NodeDocument nodeDocument) {
-        LOG.debug("checking if " + nodeDocument.getId() + " is volatile");
-        LOG.debug("tau = " + this.documentNodeStore.getVolatilityThreshold());
-        LOG.debug("L = " + this.documentNodeStore.getSlidingWindowLength());
-        int vol = 0;
-        for (Revision r : nodeDocument.getLocalDeleted().keySet()) {
-            if (!isInSlidingWindow(r)) {
-                break;
-            }
-            if (!isVisible(r)) {
-                continue;
-            }
-            LOG.debug("vol = " + new Integer(vol + 1));
-            if (vol++ >= this.documentNodeStore.getVolatilityThreshold()) {
-                break;
-            }
-        }
-        LOG.debug("isVolatile = " + new Boolean(vol >= this.documentNodeStore.getVolatilityThreshold()));
-        return vol >= this.documentNodeStore.getVolatilityThreshold();
-    }
-
-    private boolean isVisible(Revision r) {
-        int clusterId = documentNodeStore.getClusterId();
-        return r.getClusterId() == clusterId
-                || (r.compareRevisionTimeThenClusterId(documentNodeStore.getHeadRevision().getRevision(clusterId)) < 0);
-    }
-
-    private boolean isInSlidingWindow(Revision r) {
-        return System.currentTimeMillis() - documentNodeStore.getSlidingWindowLength() < r.getTimestamp();
     }
 
     @Override
@@ -713,16 +628,5 @@ public class ContentMirrorStoreStrategy implements IndexStoreStrategy {
     @Override
     public String getIndexNodeName() {
         return indexName;
-    }
-
-    private class NodeBuilderPath {
-
-        private final NodeBuilder nodeBuilder;
-        private final String path;
-
-        public NodeBuilderPath(NodeBuilder nodeBuilder, String path) {
-            this.nodeBuilder = nodeBuilder;
-            this.path = path;
-        }
     }
 }
