@@ -595,7 +595,7 @@ public class ContentMirrorStoreStrategy implements IndexStoreStrategy {
      * @param builders list of nodes to prune
      */
     private void prune(final Deque<NodeBuilder> builders) {
-        for (final NodeBuilder nodeBuilder: builders) {
+        for (final NodeBuilder nodeBuilder : builders) {
             if (nodeBuilder.getBoolean("match")) {
                 return;
             }
@@ -605,12 +605,10 @@ public class ContentMirrorStoreStrategy implements IndexStoreStrategy {
             if (!nodeBuilder.exists()) {
                 return;
             }
-            try {
-                if (((DocumentNodeState) nodeBuilder.getBaseState()).isVolatile()) {
-                    return;
-                }
-            } catch (ClassCastException ignored) {
-                LOG.debug("node does not have a corresponding document node");
+            NodeState nodeState = nodeBuilder.getBaseState();
+            if (nodeState instanceof DocumentNodeState && ((DocumentNodeState) nodeState).isVolatile()) {
+                return;
+
             }
             nodeBuilder.remove();
         }

@@ -1172,20 +1172,11 @@ public final class NodeDocument extends Document {
      *                   JSON property value String.
      * @return the split operations.
      */
-    // TODO
-//    @Nonnull
-//    public Iterable<UpdateOp> split(@Nonnull RevisionContext context,
-//                                    @Nonnull RevisionVector head,
-//                                    @Nonnull Function<String, Long> binarySize) {
-//        return SplitOperations.forDocument(this, context, head,
-//                binarySize, NUM_REVS_THRESHOLD);
-//    }
-
     @Nonnull
     public Iterable<UpdateOp> split(@Nonnull RevisionContext context,
                                     @Nonnull RevisionVector head,
                                     @Nonnull Function<String, Long> binarySize) {
-        return WASplitOperations.forDocument(this, context, head,
+        return SplitOperations.forDocument(this, context, head,
                 binarySize, NUM_REVS_THRESHOLD);
     }
 

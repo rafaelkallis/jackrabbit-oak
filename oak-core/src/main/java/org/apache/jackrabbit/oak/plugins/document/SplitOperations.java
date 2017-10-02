@@ -130,6 +130,7 @@ class SplitOperations {
             throw new IllegalArgumentException(
                     "Not a main document: " + doc.getId());
         }
+        LOG.debug("splitting " + doc.getPath());
         return new SplitOperations(doc, context, headRevision,
                 binarySize, numRevsThreshold).create();
 
@@ -418,11 +419,20 @@ class SplitOperations {
             // local property revisions
             Map<Revision, String> valueMap = doc.getLocalMap(property);
             // collect committed changes of this cluster node
+            int vol = 0;
             for (Map.Entry<Revision, String> entry : valueMap.entrySet()) {
                 Revision rev = entry.getKey();
+                LOG.debug("checking revision " + rev.toString());
+                if (property.equals("_deleted")) {
+                    if (isInSlidingWindow(rev) && isVisible(rev) && vol++ < context.getVolatilityThreshold()) {
+                        LOG.debug("not moveskip revision, not volatile yet");
+                        continue;
+                    }
+                }
                 if (rev.getClusterId() != context.getClusterId()) {
                     continue;
                 }
+                LOG.debug(rev.toString() + " will possibly be moved to split document");
                 changes.add(rev);
                 if (isCommitted(context.getCommitValue(rev, doc))) {
                     splitMap.put(rev, entry.getValue());
@@ -433,7 +443,16 @@ class SplitOperations {
         }
     }
 
-    protected boolean isGarbage(Revision rev) {
+    private boolean isVisible(Revision r) {
+        return r.getClusterId() == context.getClusterId()
+                || (r.compareRevisionTimeThenClusterId(context.getHeadRevision().getRevision(context.getClusterId())) < 0);
+    }
+
+    private boolean isInSlidingWindow(Revision r) {
+        return System.currentTimeMillis() - context.getSlidingWindowLength() < r.getTimestamp();
+    }
+
+    private boolean isGarbage(Revision rev) {
         // use headRevision as passed in the constructor instead
         // of the head revision from the RevisionContext. see OAK-3081
         if (headRevision.compareRevisionTime(rev) <= 0) {
@@ -444,7 +463,7 @@ class SplitOperations {
         return context.getBranches().getBranchCommit(rev) == null;
     }
 
-    protected void addGarbage(Revision rev, String property) {
+    private void addGarbage(Revision rev, String property) {
         if (garbageCount > GARBAGE_LIMIT) {
             return;
         }
