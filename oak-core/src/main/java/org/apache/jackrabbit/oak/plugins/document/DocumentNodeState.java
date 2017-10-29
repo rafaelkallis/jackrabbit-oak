@@ -140,8 +140,8 @@ public class DocumentNodeState extends AbstractDocumentNodeState implements Cach
     @Override
     public boolean isVolatile() {
         log.debug("checking if " + path + " is volatile");
-        log.debug("tau = " + this.store.getVolatilityThreshold());
-        log.debug("L = " + this.store.getSlidingWindowLength());
+        log.debug("tau = " + store.getVolatilityThreshold());
+        log.debug("L = " + store.getSlidingWindowLength());
         int vol = 0;
 
         final NodeDocument nodeDocument = store.getDocumentStore().find(Collection.NODES, keyFromAbsPath(path));
@@ -152,12 +152,12 @@ public class DocumentNodeState extends AbstractDocumentNodeState implements Cach
             if (!isVisible(r)) {
                 continue;
             }
-            log.debug("vol = " + new Integer(vol + 1));
+            log.debug("vol = " + (vol + 1));
             if (vol++ >= store.getVolatilityThreshold()) {
                 break;
             }
         }
-        log.debug("isVolatile = " + new Boolean(vol >= this.store.getVolatilityThreshold()));
+        log.debug("isVolatile = " + (vol >= store.getVolatilityThreshold()));
         return vol >= store.getVolatilityThreshold();
     }
 

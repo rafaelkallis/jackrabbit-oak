@@ -49,6 +49,16 @@ public final class RevisionContextWrapper implements RevisionContext {
         return clusterId;
     }
 
+    @Override
+    public int getSlidingWindowLength() {
+        return context.getSlidingWindowLength();
+    }
+
+    @Override
+    public int getVolatilityThreshold() {
+        return context.getVolatilityThreshold();
+    }
+
     @Nonnull
     @Override
     public RevisionVector getHeadRevision() {

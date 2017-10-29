@@ -18,6 +18,7 @@ package org.apache.jackrabbit.oak.plugins.document;
 
 import javax.annotation.Nonnull;
 
+import org.apache.commons.math3.distribution.IntegerDistribution;
 import org.apache.jackrabbit.oak.stats.Clock;
 
 /**
@@ -40,6 +41,16 @@ public class DummyRevisionContext implements RevisionContext {
     @Override
     public int getClusterId() {
         return 1;
+    }
+
+    @Override
+    public int getSlidingWindowLength() {
+        return 0;
+    }
+
+    @Override
+    public int getVolatilityThreshold() {
+        return Integer.MAX_VALUE;
     }
 
     @Nonnull

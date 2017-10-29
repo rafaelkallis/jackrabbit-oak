@@ -40,6 +40,8 @@ import static org.apache.jackrabbit.oak.plugins.document.UpdateOp.Operation;
 import static org.apache.jackrabbit.oak.plugins.document.util.Utils.alignWithExternalRevisions;
 import static org.apache.jackrabbit.oak.plugins.document.util.Utils.getIdFromPath;
 import static org.apache.jackrabbit.oak.plugins.document.util.Utils.pathToId;
+import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.INDEX_CONTENT_NODE_NAME;
+import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.INDEX_DEFINITIONS_NAME;
 import static org.apache.jackrabbit.oak.plugins.observation.ChangeCollectorProvider.COMMIT_CONTEXT_OBSERVATION_CHANGESET;
 
 import java.io.Closeable;
@@ -132,7 +134,7 @@ import org.slf4j.LoggerFactory;
  * Implementation of a NodeStore on {@link DocumentStore}.
  */
 public final class DocumentNodeStore
-        implements NodeStore, RevisionContext, Observable, Clusterable, NodeStateDiffer {
+        implements NodeStore, RevisionContext, Observable, Clusterable, NodeStateDiffer, AutoCloseable {
 
     private static final Logger LOG = LoggerFactory.getLogger(DocumentNodeStore.class);
 
@@ -239,9 +241,9 @@ public final class DocumentNodeStore
     private int maxBackOffMillis =
             Integer.getInteger("oak.maxBackOffMS", asyncDelay * 2);
 
-    private int changeSetMaxItems =  Integer.getInteger("oak.document.changeSet.maxItems", 50);
+    private int changeSetMaxItems = Integer.getInteger("oak.document.changeSet.maxItems", 50);
 
-    private int changeSetMaxDepth =  Integer.getInteger("oak.document.changeSet.maxDepth", 9);
+    private int changeSetMaxDepth = Integer.getInteger("oak.document.changeSet.maxDepth", 9);
 
     /**
      * Whether this instance is disposed.
@@ -278,7 +280,7 @@ public final class DocumentNodeStore
      * committed yet. The parents are not immediately persisted as this would
      * cause each commit to change all parents (including the root node), which
      * would limit write scalability.
-     *
+     * <p>
      * Key: path, value: revision.
      */
     private final UnsavedModifications unsavedLastRevisions = new UnsavedModifications();
@@ -369,7 +371,7 @@ public final class DocumentNodeStore
 
     /**
      * The node cache.
-     *
+     * <p>
      * Key: PathRev, value: DocumentNodeState
      */
     private final Cache<PathRev, DocumentNodeState> nodeCache;
@@ -377,7 +379,7 @@ public final class DocumentNodeStore
 
     /**
      * Child node cache.
-     *
+     * <p>
      * Key: PathRev, value: Children
      */
     private final Cache<PathRev, DocumentNodeState.Children> nodeChildrenCache;
@@ -409,18 +411,6 @@ public final class DocumentNodeStore
     private ClusterStateChangeListener clusterStateChangeListener;
 
     /**
-     *
-     */
-    private final Integer volatilityThreshold;
-
-    /**
-     *
-     */
-    private final Integer slidingWindowLength;
-
-
-
-    /**
      * The BlobSerializer.
      */
     private final BlobSerializer blobSerializer = new BlobSerializer() {
@@ -439,9 +429,9 @@ public final class DocumentNodeStore
             String id;
 
             String reference = blob.getReference();
-            if(reference != null){
+            if (reference != null) {
                 id = blobStore.getBlobId(reference);
-                if(id != null){
+                if (id != null) {
                     return id;
                 }
             }
@@ -477,7 +467,7 @@ public final class DocumentNodeStore
     private final JournalGarbageCollector journalGarbageCollector;
 
     private final Iterable<ReferencedBlob> referencedBlobs;
-    
+
     private final Executor executor;
 
     private final MissingLastRevSeeker lastRevSeeker;
@@ -511,9 +501,9 @@ public final class DocumentNodeStore
      * revision is added to this set when {@link #newTrunkCommit(RevisionVector)}
      * is called and removed when the commit either:
      * <ul>
-     *     <li>Succeeds with {@link #done(Commit, boolean, CommitInfo)}</li>
-     *     <li>Fails with {@link #canceled(Commit)} and the commit does *not*
-     *      have the {@link Commit#rollbackFailed()} flag set.</li>
+     * <li>Succeeds with {@link #done(Commit, boolean, CommitInfo)}</li>
+     * <li>Fails with {@link #canceled(Commit)} and the commit does *not*
+     * have the {@link Commit#rollbackFailed()} flag set.</li>
      * </ul>
      * The {@link NodeDocumentSweeper} periodically goes through this set and
      * reverts changes done by commits in the set that are older than the
@@ -521,15 +511,32 @@ public final class DocumentNodeStore
      */
     private final Set<Revision> inDoubtTrunkCommits = Sets.newConcurrentHashSet();
 
+    /**
+     *
+     */
+    private final Integer volatilityThreshold;
+
+    /**
+     *
+     */
+    private final Integer slidingWindowLength;
+
+    private final Iterable<String> propertyIndexCleanUpProps;
+
+    /**
+     *
+     */
+    private final Thread backgroundUnproductiveNodeCleanupThread;
+
     public DocumentNodeStore(DocumentMK.Builder builder) {
         this.updateLimit = builder.getUpdateLimit();
         this.commitValueResolver = new CommitValueResolver(builder.getCommitValueCacheSize(),
                 new Supplier<RevisionVector>() {
-            @Override
-            public RevisionVector get() {
-                return getSweepRevisions();
-            }
-        });
+                    @Override
+                    public RevisionVector get() {
+                        return getSweepRevisions();
+                    }
+                });
         this.blobStore = builder.getBlobStore();
         this.nodeStoreStatsCollector = builder.getNodeStoreStatsCollector();
         if (builder.isUseSimpleRevision()) {
@@ -577,6 +584,9 @@ public final class DocumentNodeStore
         this.store = s;
         this.changes = newJournalEntry();
         this.clusterId = cid;
+        this.volatilityThreshold = builder.getVolatilityThreshold();
+        this.slidingWindowLength = builder.getSlidingWindowLength();
+        this.propertyIndexCleanUpProps = builder.getPropertyIndexCleanUpProps();
         this.branches = new UnmergedBranches();
         this.asyncDelay = builder.getAsyncDelay();
         this.versionGarbageCollector = new VersionGarbageCollector(
@@ -686,6 +696,9 @@ public final class DocumentNodeStore
         leaseUpdateThread = new Thread(new BackgroundLeaseUpdate(this, isDisposed),
                 "DocumentNodeStore lease update thread " + threadNamePostfix);
         leaseUpdateThread.setDaemon(true);
+        backgroundUnproductiveNodeCleanupThread = new Thread(new BackgroundUnproductiveNodeCleanup(this, isDisposed),
+                "DocumentNodeStore unproductive index node cleanup thread" + threadNamePostfix);
+        backgroundUnproductiveNodeCleanupThread.setDaemon(true);
         // now start the background threads
         clusterUpdateThread.start();
         backgroundReadThread.start();
@@ -704,6 +717,9 @@ public final class DocumentNodeStore
 
             backgroundUpdateThread.start();
             backgroundSweepThread.start();
+
+            // TODO:
+//            backgroundUnproductiveNodeCleanupThread.start();
         }
 
         persistentCache = builder.getPersistentCache();
@@ -722,15 +738,13 @@ public final class DocumentNodeStore
         if (!builder.isBundlingDisabled()) {
             bundlingConfigHandler.initialize(this, executor);
         }
-        this.volatilityThreshold = builder.getVolatilityThreshold();
-        this.slidingWindowLength = builder.getSlidingWindowLength();
     }
 
-    public Integer getVolatilityThreshold() {
+    public int getVolatilityThreshold() {
         return volatilityThreshold;
     }
 
-    public Integer getSlidingWindowLength() {
+    public int getSlidingWindowLength() {
         return slidingWindowLength;
     }
 
@@ -738,7 +752,7 @@ public final class DocumentNodeStore
      * Recover _lastRev recovery if needed.
      *
      * @throws DocumentStoreException if recovery did not finish within
-     *          {@link #recoveryWaitTimeoutMS}.
+     *                                {@link #recoveryWaitTimeoutMS}.
      */
     private void checkLastRevRecovery() throws DocumentStoreException {
         long timeout = clock.getTime() + recoveryWaitTimeoutMS;
@@ -756,6 +770,11 @@ public final class DocumentNodeStore
                     "Failing startup of this DocumentNodeStore now!";
             throw new DocumentStoreException(msg);
         }
+    }
+
+    @Override
+    public void close() {
+        this.dispose();
     }
 
     public void dispose() {
@@ -854,7 +873,7 @@ public final class DocumentNodeStore
     }
 
     private String getClusterNodeInfoDisplayString() {
-        return (readOnlyMode?"readOnly:true, ":"") + clusterNodeInfo.toString().replaceAll("[\r\n\t]", " ").trim();
+        return (readOnlyMode ? "readOnly:true, " : "") + clusterNodeInfo.toString().replaceAll("[\r\n\t]", " ").trim();
     }
 
     void setRoot(@Nonnull RevisionVector newHead) {
@@ -872,8 +891,8 @@ public final class DocumentNodeStore
      * {@link #done(Commit, boolean, CommitInfo)} or {@link #canceled(Commit)},
      * depending on the result of the commit.
      *
-     * @param base the base revision for the commit or <code>null</code> if the
-     *             commit should use the current head revision as base.
+     * @param base   the base revision for the commit or <code>null</code> if the
+     *               commit should use the current head revision as base.
      * @param branch the branch instance if this is a branch commit. The life
      *               time of this branch commit is controlled by the
      *               reachability of this parameter. Once {@code branch} is
@@ -899,8 +918,8 @@ public final class DocumentNodeStore
      * {@link #done(Commit, boolean, CommitInfo)} or {@link #canceled(Commit)},
      * depending on the result of the commit.
      *
-     * @param base the base revision for the commit or <code>null</code> if the
-     *             commit should use the current head revision as base.
+     * @param base             the base revision for the commit or <code>null</code> if the
+     *                         commit should use the current head revision as base.
      * @param numBranchCommits the number of branch commits to merge.
      * @return a new merge commit.
      */
@@ -1082,7 +1101,7 @@ public final class DocumentNodeStore
         nodeChildrenCache.invalidateAll();
     }
 
-    void invalidateNodeCache(String path, RevisionVector revision){
+    void invalidateNodeCache(String path, RevisionVector revision) {
         nodeCache.invalidate(new PathRev(path, revision));
     }
 
@@ -1105,13 +1124,13 @@ public final class DocumentNodeStore
 
     @CheckForNull
     AbstractDocumentNodeState getSecondaryNodeState(@Nonnull final String path,
-                              @Nonnull final RevisionVector rootRevision,
-                              @Nonnull final RevisionVector rev) {
+                                                    @Nonnull final RevisionVector rootRevision,
+                                                    @Nonnull final RevisionVector rev) {
         //Check secondary cache first
         return nodeStateCache.getDocumentNodeState(path, rootRevision, rev);
     }
 
-    PropertyState createPropertyState(String name, String value){
+    PropertyState createPropertyState(String name, String value) {
         return new DocumentPropertyState(this, name, checkNotNull(value));
     }
 
@@ -1120,13 +1139,13 @@ public final class DocumentNodeStore
      * not be modified directly.
      *
      * @param path the path of the node.
-     * @param rev the read revision.
+     * @param rev  the read revision.
      * @return the node or <code>null</code> if the node does not exist at the
-     *          given revision.
+     * given revision.
      */
     @CheckForNull
     public DocumentNodeState getNode(@Nonnull final String path,
-                              @Nonnull final RevisionVector rev) {
+                                     @Nonnull final RevisionVector rev) {
         checkNotNull(rev);
         checkNotNull(path);
         final long start = PERFLOG.start();
@@ -1136,7 +1155,7 @@ public final class DocumentNodeStore
                 @Override
                 public DocumentNodeState call() throws Exception {
                     boolean nodeDoesNotExist = checkNodeNotExistsFromChildrenCache(path, rev);
-                    if (nodeDoesNotExist){
+                    if (nodeDoesNotExist) {
                         return missing;
                     }
                     DocumentNodeState n = readNode(path, rev);
@@ -1159,8 +1178,8 @@ public final class DocumentNodeStore
 
     @Nonnull
     DocumentNodeState.Children getChildren(@Nonnull final AbstractDocumentNodeState parent,
-                              @Nullable final String name,
-                              final int limit)
+                                           @Nullable final String name,
+                                           final int limit)
             throws DocumentStoreException {
         if (checkNotNull(parent).hasNoChildren()) {
             return DocumentNodeState.NO_CHILDREN;
@@ -1183,7 +1202,7 @@ public final class DocumentNodeStore
                 children = readChildren(parent, name, limit);
                 nodeChildrenCache.put(key, children);
             }
-            return children;                
+            return children;
         } catch (UncheckedExecutionException e) {
             throw DocumentStoreException.convert(e.getCause(),
                     "Error occurred while fetching children for path "
@@ -1202,9 +1221,9 @@ public final class DocumentNodeStore
      * ascending order.
      *
      * @param parent the parent node.
-     * @param name the name of the lower bound child node (exclusive) or
-     *              {@code null} if no lower bound is given.
-     * @param limit the maximum number of child nodes to return.
+     * @param name   the name of the lower bound child node (exclusive) or
+     *               {@code null} if no lower bound is given.
+     * @param limit  the maximum number of child nodes to return.
      * @return the children of {@code parent}.
      */
     DocumentNodeState.Children readChildren(AbstractDocumentNodeState parent,
@@ -1219,7 +1238,7 @@ public final class DocumentNodeStore
         // this gives us a chance to detect whether there are more
         // child nodes than requested.
         int rawLimit = (int) Math.min(Integer.MAX_VALUE, ((long) limit) + 1);
-        for (;;) {
+        for (; ; ) {
             docs = readChildDocs(path, name, rawLimit);
             int numReturned = 0;
             for (NodeDocument doc : docs) {
@@ -1264,8 +1283,8 @@ public final class DocumentNodeStore
      * child document returned is after the given name. That is, the name is the
      * lower exclusive bound.
      *
-     * @param path the path of the parent document.
-     * @param name the lower exclusive bound or {@code null}.
+     * @param path  the path of the parent document.
+     * @param name  the lower exclusive bound or {@code null}.
      * @param limit the maximum number of child documents to return.
      * @return the child documents.
      */
@@ -1288,16 +1307,16 @@ public final class DocumentNodeStore
      * {@code name} (exclusive).
      *
      * @param parent the parent node.
-     * @param name the name of the lower bound child node (exclusive) or
-     *             {@code null}, if the method should start with the first known
-     *             child node.
-     * @param limit the maximum number of child nodes to return.
+     * @param name   the name of the lower bound child node (exclusive) or
+     *               {@code null}, if the method should start with the first known
+     *               child node.
+     * @param limit  the maximum number of child nodes to return.
      * @return the child nodes.
      */
     @Nonnull
     Iterable<DocumentNodeState> getChildNodes(@Nonnull final DocumentNodeState parent,
-                    @Nullable final String name,
-                    final int limit) {
+                                              @Nullable final String name,
+                                              final int limit) {
         // Preemptive check. If we know there are no children then
         // return straight away
         if (checkNotNull(parent).hasNoChildren()) {
@@ -1375,15 +1394,14 @@ public final class DocumentNodeStore
     /**
      * Apply the changes of a node to the cache.
      *
-     * @param before the before revision (old head)
-     * @param after the after revision (new head)
-     * @param rev the commit revision
-     * @param path the path
-     * @param isNew whether this is a new node
-     * @param added the list of added child nodes
+     * @param before  the before revision (old head)
+     * @param after   the after revision (new head)
+     * @param rev     the commit revision
+     * @param path    the path
+     * @param isNew   whether this is a new node
+     * @param added   the list of added child nodes
      * @param removed the list of removed child nodes
      * @param changed the list of changed child nodes
-     *
      */
     void applyChanges(RevisionVector before, RevisionVector after,
                       Revision rev, String path,
@@ -1456,7 +1474,7 @@ public final class DocumentNodeStore
                     // simply use the same list
                     LOG.debug("nodeChildrenCache.put({},{})", afterKey, children);
                     nodeChildrenCache.put(afterKey, children);
-                } else if (!children.hasMore){
+                } else if (!children.hasMore) {
                     // list is complete. use before children as basis
                     Set<String> afterChildren = Sets.newTreeSet(children.children);
                     for (String p : added) {
@@ -1503,10 +1521,10 @@ public final class DocumentNodeStore
     /**
      * Updates a commit root document.
      *
-     * @param commit the updates to apply on the commit root document.
+     * @param commit    the updates to apply on the commit root document.
      * @param commitRev the commit revision.
      * @return the document before the update was applied or <code>null</code>
-     *          if the update failed because of a collision.
+     * if the update failed because of a collision.
      * @throws DocumentStoreException if the update fails with an error.
      */
     @CheckForNull
@@ -1539,13 +1557,13 @@ public final class DocumentNodeStore
      * reading the affected document and checks if the {@code commitRev} is
      * set in the revisions map.
      *
-     * @param commit the update operation on the commit root document.
+     * @param commit    the update operation on the commit root document.
      * @param commitRev the commit revision.
-     * @param e the exception that will be thrown when this method determines
-     *          that the update was not applied.
+     * @param e         the exception that will be thrown when this method determines
+     *                  that the update was not applied.
      * @return the before document.
      * @throws DocumentStoreException the exception passed to this document
-     *      in case the commit update was not applied.
+     *                                in case the commit update was not applied.
      */
     private NodeDocument verifyCommitRootUpdateApplied(UpdateOp commit,
                                                        Revision commitRev,
@@ -1760,8 +1778,8 @@ public final class DocumentNodeStore
      * @param base the base node to compare against.
      * @param diff handler of node state differences
      * @return {@code true} if the full diff was performed, or
-     *         {@code false} if it was aborted as requested by the handler
-     *         (see the {@link NodeStateDiff} contract for more details)
+     * {@code false} if it was aborted as requested by the handler
+     * (see the {@link NodeStateDiff} contract for more details)
      */
     @Override
     public boolean compare(@Nonnull final AbstractDocumentNodeState node,
@@ -1786,7 +1804,7 @@ public final class DocumentNodeStore
     /**
      * Creates a tracker for the given commit revision.
      *
-     * @param r a commit revision.
+     * @param r              a commit revision.
      * @param isBranchCommit whether this is a branch commit.
      * @return a _lastRev tracker for the given commit revision.
      */
@@ -1808,7 +1826,7 @@ public final class DocumentNodeStore
     /**
      * Suspends until all given revisions are either visible from the current
      * headRevision or canceled from the commit queue.
-     *
+     * <p>
      * Only revisions from the local cluster node will be considered if the async
      * delay is set to 0.
      *
@@ -1881,7 +1899,7 @@ public final class DocumentNodeStore
     @Override
     public Blob getBlob(@Nonnull String reference) {
         String blobId = blobStore.getBlobId(reference);
-        if(blobId != null){
+        if (blobId != null) {
             return new BlobStoreBlob(blobStore, blobId);
         }
         LOG.debug("No blobId found matching reference [{}]", reference);
@@ -1894,7 +1912,7 @@ public final class DocumentNodeStore
      * @param blobId the blobId of the blob.
      * @return the blob.
      */
-    public Blob getBlobFromBlobId(String blobId){
+    public Blob getBlobFromBlobId(String blobId) {
         return new BlobStoreBlob(blobStore, blobId);
     }
 
@@ -1929,14 +1947,14 @@ public final class DocumentNodeStore
     public Iterable<String> checkpoints() {
         final long now = clock.getTime();
         return Iterables.transform(Iterables.filter(checkpoints.getCheckpoints().entrySet(),
-                new Predicate<Map.Entry<Revision,Checkpoints.Info>>() {
+                new Predicate<Map.Entry<Revision, Checkpoints.Info>>() {
+                    @Override
+                    public boolean apply(Map.Entry<Revision, Checkpoints.Info> cp) {
+                        return cp.getValue().getExpiryTime() > now;
+                    }
+                }), new Function<Map.Entry<Revision, Checkpoints.Info>, String>() {
             @Override
-            public boolean apply(Map.Entry<Revision,Checkpoints.Info> cp) {
-                return cp.getValue().getExpiryTime() > now;
-            }
-        }), new Function<Map.Entry<Revision,Checkpoints.Info>, String>() {
-            @Override
-            public String apply(Map.Entry<Revision,Checkpoints.Info> cp) {
+            public String apply(Map.Entry<Revision, Checkpoints.Info> cp) {
                 return cp.getKey().toString();
             }
         });
@@ -2006,14 +2024,18 @@ public final class DocumentNodeStore
 
     //----------------------< background operations >---------------------------
 
-    /** Used for testing only */
+    /**
+     * Used for testing only
+     */
     public void runBackgroundOperations() {
         runBackgroundSweepOperation();
         runBackgroundUpdateOperations();
         runBackgroundReadOperations();
     }
 
-    /** Note: made package-protected for testing purpose, would otherwise be private **/
+    /**
+     * Note: made package-protected for testing purpose, would otherwise be private
+     **/
     void runBackgroundUpdateOperations() {
         if (readOnlyMode || isDisposed.get()) {
             return;
@@ -2027,6 +2049,8 @@ public final class DocumentNodeStore
             LOG.warn("Background update operation failed (will be retried with next run): " + e.toString(), e);
             throw e;
         }
+
+
     }
 
     private void internalRunBackgroundUpdateOperations() {
@@ -2057,7 +2081,9 @@ public final class DocumentNodeStore
 
     //----------------------< background read operations >----------------------
 
-    /** Note: made package-protected for testing purpose, would otherwise be private **/
+    /**
+     * Note: made package-protected for testing purpose, would otherwise be private
+     **/
     void runBackgroundReadOperations() {
         if (isDisposed.get()) {
             return;
@@ -2073,7 +2099,9 @@ public final class DocumentNodeStore
         }
     }
 
-    /** OAK-2624 : background read operations are split from background update ops */
+    /**
+     * OAK-2624 : background read operations are split from background update ops
+     */
     private void internalRunBackgroundReadOperations() {
         BackgroundReadStats readStats = null;
         synchronized (backgroundReadMonitor) {
@@ -2176,8 +2204,8 @@ public final class DocumentNodeStore
 
     /**
      * @return the minimum revisions of foreign cluster nodes since they were
-     *          started. The revision is derived from the start time of the
-     *          cluster node.
+     * started. The revision is derived from the start time of the
+     * cluster node.
      */
     @Nonnull
     private RevisionVector getMinExternalRevisions() {
@@ -2189,11 +2217,11 @@ public final class DocumentNodeStore
                     }
                 }),
                 new Function<ClusterNodeInfoDocument, Revision>() {
-            @Override
-            public Revision apply(ClusterNodeInfoDocument input) {
-                return new Revision(input.getStartTime(), 0, input.getClusterId());
-            }
-        }));
+                    @Override
+                    public Revision apply(ClusterNodeInfoDocument input) {
+                        return new Revision(input.getStartTime(), 0, input.getClusterId());
+                    }
+                }));
     }
 
     /**
@@ -2267,7 +2295,7 @@ public final class DocumentNodeStore
 
     private static ChangeSet getChangeSet(CommitInfo info) {
         CommitContext commitContext = (CommitContext) info.getInfo().get(CommitContext.NAME);
-        if (commitContext == null){
+        if (commitContext == null) {
             return null;
         }
         return (ChangeSet) commitContext.get(COMMIT_CONTEXT_OBSERVATION_CHANGESET);
@@ -2280,7 +2308,7 @@ public final class DocumentNodeStore
     private void cleanOrphanedBranches() {
         Branch b;
         while ((b = branches.pollOrphanedBranch()) != null) {
-            LOG.debug("Cleaning up orphaned branch with base revision: {}, " + 
+            LOG.debug("Cleaning up orphaned branch with base revision: {}, " +
                     "commits: {}", b.getBase(), b.getCommits());
             UpdateOp op = new UpdateOp(Utils.getIdFromPath("/"), false);
             for (Revision r : b.getCommits()) {
@@ -2291,7 +2319,7 @@ public final class DocumentNodeStore
             store.findAndUpdate(NODES, op);
         }
     }
-    
+
     private void cleanCollisions() {
         String id = Utils.getIdFromPath("/");
         NodeDocument root = store.find(NODES, id);
@@ -2307,7 +2335,7 @@ public final class DocumentNodeStore
                 // this revision and the revision is before the current
                 // head. That is, the collision cannot be related to commit
                 // which is progress.
-                if (branches.getBranchCommit(r) == null 
+                if (branches.getBranchCommit(r) == null
                         && !head.isRevisionNewer(r)) {
                     NodeDocument.removeCollision(op, r);
                 }
@@ -2319,9 +2347,14 @@ public final class DocumentNodeStore
         }
     }
 
+    // TODO:
+    private void cleanUnproductiveIndexNodes() {
+
+    }
+
     private void backgroundSplit() {
         RevisionVector head = getHeadRevision();
-        for (Iterator<String> it = splitCandidates.keySet().iterator(); it.hasNext();) {
+        for (Iterator<String> it = splitCandidates.keySet().iterator(); it.hasNext(); ) {
             String id = it.next();
             NodeDocument doc = store.find(Collection.NODES, id);
             if (doc == null) {
@@ -2364,16 +2397,16 @@ public final class DocumentNodeStore
     private BackgroundWriteStats backgroundWrite() {
         return unsavedLastRevisions.persist(getDocumentStore(),
                 new Supplier<Revision>() {
-            @Override
-            public Revision get() {
-                return getSweepRevisions().getRevision(getClusterId());
-            }
-        }, new UnsavedModifications.Snapshot() {
-            @Override
-            public void acquiring(Revision mostRecent) {
-                pushJournalEntry(mostRecent);
-            }
-        }, backgroundOperationLock.writeLock());
+                    @Override
+                    public Revision get() {
+                        return getSweepRevisions().getRevision(getClusterId());
+                    }
+                }, new UnsavedModifications.Snapshot() {
+                    @Override
+                    public void acquiring(Revision mostRecent) {
+                        pushJournalEntry(mostRecent);
+                    }
+                }, backgroundOperationLock.writeLock());
     }
 
     private void maybeRefreshHeadRevision() {
@@ -2527,10 +2560,10 @@ public final class DocumentNodeStore
      * Checks if this node store can operate on the data in the given document
      * store.
      *
-     * @param store the document store.
+     * @param store        the document store.
      * @param readOnlyMode whether this node store is in read-only mode.
      * @throws DocumentStoreException if the versions are incompatible given the
-     *      access mode (read-write vs. read-only).
+     *                                access mode (read-write vs. read-only).
      */
     private static void checkVersion(DocumentStore store, boolean readOnlyMode)
             throws DocumentStoreException {
@@ -2694,7 +2727,7 @@ public final class DocumentNodeStore
      * Search for presence of child node as denoted by path in the children cache of parent
      *
      * @param path
-     * @param rev revision at which check is performed
+     * @param rev  revision at which check is performed
      * @return <code>true</code> if and only if the children cache entry for parent path is complete
      * and that list does not have the given child node. A <code>false</code> indicates that node <i>might</i>
      * exist
@@ -2949,7 +2982,7 @@ public final class DocumentNodeStore
         return (DocumentRootBuilder) builder;
     }
 
-    private static long now(){
+    private static long now() {
         return System.currentTimeMillis();
     }
 
@@ -2979,19 +3012,19 @@ public final class DocumentNodeStore
      */
     @CheckForNull
     public MarkSweepGarbageCollector createBlobGarbageCollector(long blobGcMaxAgeInSecs,
-            String repositoryId) {
+                                                                String repositoryId) {
         MarkSweepGarbageCollector blobGC = null;
-        if(blobStore instanceof GarbageCollectableBlobStore){
+        if (blobStore instanceof GarbageCollectableBlobStore) {
             try {
                 blobGC = new MarkSweepGarbageCollector(
                         new DocumentBlobReferenceRetriever(this),
-                            (GarbageCollectableBlobStore) blobStore,
+                        (GarbageCollectableBlobStore) blobStore,
                         executor,
                         SECONDS.toMillis(blobGcMaxAgeInSecs),
                         repositoryId);
             } catch (IOException e) {
                 throw new RuntimeException("Error occurred while initializing " +
-                        "the MarkSweepGarbageCollector",e);
+                        "the MarkSweepGarbageCollector", e);
             }
         }
         return blobGC;
@@ -3142,7 +3175,9 @@ public final class DocumentNodeStore
 
     private static class BackgroundLeaseUpdate extends NodeStoreTask {
 
-        /** OAK-4859 : log if time between two renewClusterIdLease calls is too long **/
+        /**
+         * OAK-4859 : log if time between two renewClusterIdLease calls is too long
+         **/
         private long lastRenewClusterIdLeaseCall = -1;
 
         BackgroundLeaseUpdate(DocumentNodeStore nodeStore,
@@ -3172,7 +3207,7 @@ public final class DocumentNodeStore
     private static class BackgroundClusterUpdate extends NodeStoreTask {
 
         BackgroundClusterUpdate(DocumentNodeStore nodeStore,
-                              AtomicBoolean isDisposed) {
+                                AtomicBoolean isDisposed) {
             super(nodeStore, isDisposed, Suppliers.ofInstance(1000));
         }
 
@@ -3181,6 +3216,44 @@ public final class DocumentNodeStore
             if (nodeStore.updateClusterState()) {
                 nodeStore.signalClusterStateChange();
             }
+        }
+    }
+
+    private static class BackgroundUnproductiveNodeCleanup extends NodeStoreTask {
+
+        BackgroundUnproductiveNodeCleanup(DocumentNodeStore nodeStore, AtomicBoolean isDisposed) {
+            super(nodeStore, isDisposed);
+        }
+
+        @Override
+        protected void execute(@Nonnull DocumentNodeStore nodeStore) {
+            final NodeState indexDefinitionsNode = nodeStore.getRoot()
+                    .getChildNode(INDEX_DEFINITIONS_NAME);
+            for (String cleanUpProp : nodeStore.propertyIndexCleanUpProps) {
+                final NodeState indexContentNode = indexDefinitionsNode
+                        .getChildNode(cleanUpProp)
+                        .getChildNode(INDEX_CONTENT_NODE_NAME);
+                for (String key : indexContentNode.getChildNodeNames()) {
+                    cleanUp(indexContentNode.getChildNode(key));
+                }
+            }
+        }
+
+        private boolean cleanUp(NodeState node) {
+            boolean hasChild = false;
+            for (String childNodeName : node.getChildNodeNames()) {
+                boolean isChildRemoved = cleanUp(node.getChildNode(childNodeName));
+                hasChild |= !isChildRemoved;
+            }
+            if (!hasChild &&
+                    !node.hasProperty("match") &&
+                    node instanceof DocumentNodeState &&
+                    !((DocumentNodeState) node).isVolatile()
+                    ) {
+                node.builder().remove();
+                return true;
+            }
+            return false;
         }
     }
 
@@ -3194,7 +3267,7 @@ public final class DocumentNodeStore
 
     /**
      * Returns an iterator for all the blob present in the store.
-     *
+     * <p>
      * <p>In some cases the iterator might implement {@link java.io.Closeable}. So
      * callers should check for such iterator and close them.
      *
@@ -3221,7 +3294,7 @@ public final class DocumentNodeStore
     public JournalGarbageCollector getJournalGarbageCollector() {
         return journalGarbageCollector;
     }
-    
+
     @Nonnull
     public LastRevRecoveryAgent getLastRevRecoveryAgent() {
         return lastRevRecoveryAgent;
@@ -3231,7 +3304,7 @@ public final class DocumentNodeStore
     public String getInstanceId() {
         return String.valueOf(getClusterId());
     }
-    
+
     @Override
     public String getVisibilityToken() {
         final DocumentNodeState theRoot = root;
@@ -3241,7 +3314,7 @@ public final class DocumentNodeStore
         }
         return theRoot.getRootRevision().asString();
     }
-    
+
     private boolean isVisible(RevisionVector rv) {
         // do not synchronize, take a local copy instead
         final DocumentNodeState localRoot = root;
@@ -3251,7 +3324,7 @@ public final class DocumentNodeStore
         }
         return Utils.isGreaterOrEquals(localRoot.getRootRevision(), rv);
     }
-    
+
     @Override
     public boolean isVisible(@Nonnull String visibilityToken, long maxWaitMillis) throws InterruptedException {
         if (Strings.isNullOrEmpty(visibilityToken)) {
@@ -3267,11 +3340,11 @@ public final class DocumentNodeStore
             // the simple case
             return true;
         }
-        
+
         // otherwise wait until the visibility token's revisions all become visible
         // (or maxWaitMillis has passed)
         commitQueue.suspendUntilAll(Sets.newHashSet(visibilityTokenRv), maxWaitMillis);
-        
+
         // if we got interrupted above would throw InterruptedException
         // otherwise, we don't know why suspendUntilAll returned, so
         // check the final isVisible state and return it

@@ -584,12 +584,12 @@ public class LastRevRecoveryAgent {
         }
 
         @Override
-        public Integer getSlidingWindowLength() {
+        public int getSlidingWindowLength() {
             return context.getSlidingWindowLength();
         }
 
         @Override
-        public Integer getVolatilityThreshold() {
+        public int getVolatilityThreshold() {
             return context.getVolatilityThreshold();
         }
 

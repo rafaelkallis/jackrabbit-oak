@@ -254,6 +254,7 @@ public class MongoVersionGCSupport extends VersionGCSupport {
                                        long oldestRevTimeStamp,
                                        VersionGCStats stats) {
             super(MongoVersionGCSupport.this.store, stats,
+
                     identifyGarbage(gcTypes, sweepRevs, oldestRevTimeStamp));
             this.gcTypes = gcTypes;
             this.sweepRevs = sweepRevs;

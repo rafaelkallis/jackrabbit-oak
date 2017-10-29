@@ -26,11 +26,7 @@ import static org.apache.jackrabbit.oak.plugins.document.util.MongoConnection.re
 
 import java.io.InputStream;
 import java.net.UnknownHostException;
-import java.util.EnumMap;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
@@ -243,7 +239,7 @@ public class DocumentMK {
     }
 
     public String getNodes(String path, String revisionId, int depth,
-            long offset, int maxChildNodes, String filter)
+                           long offset, int maxChildNodes, String filter)
             throws DocumentStoreException {
         if (depth != 0) {
             throw new DocumentStoreException("Only depth 0 is supported, depth is " + depth);
@@ -290,7 +286,7 @@ public class DocumentMK {
     }
 
     public String commit(String rootPath, String jsonDiff, String baseRevId,
-            String message) throws DocumentStoreException {
+                         String message) throws DocumentStoreException {
         boolean success = false;
         boolean isBranch;
         RevisionVector rev;
@@ -566,7 +562,7 @@ public class DocumentMK {
         private MongoStatus mongoStatus;
         private DiffCache diffCache;
         private BlobStore blobStore;
-        private int clusterId  = Integer.getInteger("oak.documentMK.clusterId", 0);
+        private int clusterId = Integer.getInteger("oak.documentMK.clusterId", 0);
         private int asyncDelay = 1000;
         private boolean timing;
         private boolean logging;
@@ -607,8 +603,9 @@ public class DocumentMK {
         private GCMonitor gcMonitor = new LoggingGCMonitor(
                 LoggerFactory.getLogger(VersionGarbageCollector.class));
 
-        private Integer volatilityThreshold = null;
-        private Integer slidingWindowLength = null;
+        private int volatilityThreshold = Integer.getInteger("oak.documentMK.volatilityThreshold", Integer.MAX_VALUE);
+        private int slidingWindowLength = Integer.getInteger("oak.documentMK.slidingWindowLength", 0);
+        private Iterable<String> propertyIndexCleanUpProps = Collections.emptySet();
 
         public Builder() {
         }
@@ -623,12 +620,26 @@ public class DocumentMK {
             return this;
         }
 
-        public Integer getVolatilityThreshold() {
+        public Builder setPropertyIndexCleanUpProps(String... propertyIndexCleanUpProps) {
+            this.propertyIndexCleanUpProps = Arrays.asList(propertyIndexCleanUpProps);
+            return this;
+        }
+
+        public Builder setPropertyIndexCleanUpProps(Iterable<String> propertyIndexCleanUpProps) {
+            this.propertyIndexCleanUpProps = propertyIndexCleanUpProps;
+            return this;
+        }
+
+        public int getVolatilityThreshold() {
             return volatilityThreshold;
         }
 
-        public Integer getSlidingWindowLength() {
+        public int getSlidingWindowLength() {
             return slidingWindowLength;
+        }
+
+        public Iterable<String> getPropertyIndexCleanUpProps() {
+            return this.propertyIndexCleanUpProps;
         }
 
         /**
@@ -639,13 +650,13 @@ public class DocumentMK {
          * in the URI, the write concern will be {@code MAJORITY}, otherwise
          * {@code ACKNOWLEDGED}.
          *
-         * @param uri a MongoDB URI.
-         * @param name the name of the database to connect to. This overrides
-         *             any database name given in the {@code uri}.
+         * @param uri             a MongoDB URI.
+         * @param name            the name of the database to connect to. This overrides
+         *                        any database name given in the {@code uri}.
          * @param blobCacheSizeMB the blob cache size in MB.
          * @return this
          * @throws UnknownHostException if one of the hosts given in the URI
-         *          is unknown.
+         *                              is unknown.
          */
         public Builder setMongoDB(@Nonnull String uri,
                                   @Nonnull String name,
@@ -782,7 +793,7 @@ public class DocumentMK {
          */
         public Builder setRDBConnection(DataSource ds, RDBOptions options) {
             this.documentStoreSupplier = ofInstance(new RDBDocumentStore(ds, this, options));
-            if(blobStore == null) {
+            if (blobStore == null) {
                 GarbageCollectableBlobStore s = new RDBBlobStore(ds, options);
                 setBlobStore(s);
             }
@@ -797,7 +808,7 @@ public class DocumentMK {
          */
         public Builder setRDBConnection(DataSource documentStoreDataSource, DataSource blobStoreDataSource) {
             this.documentStoreSupplier = ofInstance(new RDBDocumentStore(documentStoreDataSource, this));
-            if(blobStore == null) {
+            if (blobStore == null) {
                 GarbageCollectableBlobStore s = new RDBBlobStore(blobStoreDataSource);
                 setBlobStore(s);
             }
@@ -990,7 +1001,7 @@ public class DocumentMK {
                                                int diffCachePercentage) {
             checkArgument(nodeCachePercentage >= 0);
             checkArgument(prevDocCachePercentage >= 0);
-            checkArgument(childrenCachePercentage>= 0);
+            checkArgument(childrenCachePercentage >= 0);
             checkArgument(diffCachePercentage >= 0);
             checkArgument(nodeCachePercentage + prevDocCachePercentage + childrenCachePercentage +
                     diffCachePercentage < 100);
@@ -1040,13 +1051,13 @@ public class DocumentMK {
         }
 
         public Executor getExecutor() {
-            if(executor == null){
+            if (executor == null) {
                 return MoreExecutors.sameThreadExecutor();
             }
             return executor;
         }
 
-        public Builder setExecutor(Executor executor){
+        public Builder setExecutor(Executor executor) {
             this.executor = executor;
             return this;
         }
@@ -1056,7 +1067,7 @@ public class DocumentMK {
             return this;
         }
 
-        public Builder setStatisticsProvider(StatisticsProvider statisticsProvider){
+        public Builder setStatisticsProvider(StatisticsProvider statisticsProvider) {
             this.statisticsProvider = statisticsProvider;
             return this;
         }
@@ -1064,6 +1075,7 @@ public class DocumentMK {
         public StatisticsProvider getStatisticsProvider() {
             return this.statisticsProvider;
         }
+
         public DocumentStoreStatsCollector getDocumentStoreStatsCollector() {
             if (documentStoreStatsCollector == null) {
                 documentStoreStatsCollector = new DocumentStoreStats(statisticsProvider);
@@ -1107,7 +1119,7 @@ public class DocumentMK {
             return clock;
         }
 
-        public Builder setMaxReplicationLag(long duration, TimeUnit unit){
+        public Builder setMaxReplicationLag(long duration, TimeUnit unit) {
             maxReplicationLagMillis = unit.toMillis(duration);
             return this;
         }
@@ -1279,8 +1291,8 @@ public class DocumentMK {
                 long maxWeight,
                 DocumentNodeStore docNodeStore,
                 DocumentStore docStore
-                ) {
-            Set<EvictionListener<K, V>> listeners = new CopyOnWriteArraySet<EvictionListener<K,V>>();
+        ) {
+            Set<EvictionListener<K, V>> listeners = new CopyOnWriteArraySet<EvictionListener<K, V>>();
             Cache<K, V> cache = buildCache(cacheType.name(), maxWeight, listeners);
             PersistentCache p = null;
             if (cacheType == CacheType.DIFF || cacheType == CacheType.LOCAL_DIFF) {
@@ -1393,12 +1405,12 @@ public class DocumentMK {
          * @param blobStore store to config
          */
         private void configureBlobStore(BlobStore blobStore) {
-            if (blobStore instanceof AbstractBlobStore){
+            if (blobStore instanceof AbstractBlobStore) {
                 this.blobStoreStats = new BlobStoreStats(statisticsProvider);
                 ((AbstractBlobStore) blobStore).setStatsCollector(blobStoreStats);
             }
 
-            if (blobStore instanceof CachingBlobStore){
+            if (blobStore instanceof CachingBlobStore) {
                 blobStoreCacheStats = ((CachingBlobStore) blobStore).getCacheStats();
             }
         }
