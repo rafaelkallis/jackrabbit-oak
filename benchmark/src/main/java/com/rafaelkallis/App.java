@@ -72,6 +72,10 @@ public class App {
     static final boolean benchmarkQueryUnproductiveNodes = benchmark.equals("query_unproductive_nodes");
     static final boolean benchmarkIndexNodes = benchmark.equals("index_nodes");
     static final boolean benchmarkTicks = benchmark.equals("ticks");
+    static final boolean benchmarkVolatileNodes = benchmark.equals("volatile_nodes");
+    static final boolean benchmarkGCMillis = benchmark.equals("benchmark_gc_millis");
+    static final boolean benchmarkGCCleanedNodes = benchmark.equals("benchmark_gc_cleaned_nodes");
+    static final boolean benchmarkQTPCleanedNodes = benchmark.equals("benchmark_qtp_cleaned_nodes");
     static final Boolean skipInitialize = Boolean.getBoolean("skipInitialize");
     static final String writeMode = System.getProperty("writeMode", "toggle");
     static final Boolean toggleWriteMode = writeMode.equals("toggle");
@@ -83,7 +87,8 @@ public class App {
     static final boolean aemDataset = dataset.equals("aem");
     static final String outFileName = System.getProperty("outFileName", String.format("output_%s_%d_%s_tau%d_L%d", benchmark, System.currentTimeMillis() / 1000L, dataset, volatilityThreshold, slidingWindowLength));
     static final boolean QTP = Boolean.getBoolean("QTP");
-    static final long GCPeriodicity = Long.getLong("GCPerdiodicity", Long.MAX_VALUE);
+    static final boolean GC = Boolean.getBoolean("GC");
+    static final long GCPeriodicity = Long.getLong("GCPeriodicity", 30 * 1000);
 
     public static void main(String[] args) throws CommitFailedException, IOException, ParseException {
 
@@ -115,6 +120,9 @@ public class App {
         LOG.debug("skipInitialize: {}", skipInitialize);
         LOG.debug("queryMode: {}", queryMode);
         LOG.debug("dataset: {}", dataset);
+        LOG.debug("GC: {}", GC);
+        LOG.debug("GCPeriodicity: {}", GCPeriodicity);
+        LOG.debug("QTP: {}", QTP);
 
         try (final MongoClient mongoClient = new MongoClient()) {
             final DB db = mongoClient.getDB(mongoName);
@@ -172,6 +180,10 @@ public class App {
             ) {
                 final ClusterNode clusterNode = new ClusterNode(nodeStore);
 
+                final Timer gcTimer = new Timer();
+
+                final Supplier<String[]> aemNodesSupplier = aemNodes(clusterNode);
+
                 final AtomicLong warmUpTickCounter = new AtomicLong(0);
                 final AtomicLong experimentTickCounter = new AtomicLong(0);
 
@@ -184,16 +196,28 @@ public class App {
                 final Supplier<String> writeNodePaths = syntheticDataset
                         ? syntheticTreeWriteNodePaths(workload)
                         : aemDataset
-                        ? throwException()
-                        : throwException();
+                        ? aemWriteNodePaths(aemNodesSupplier.get(), workload)
+                        : throwException("no write node path supplier");
 
                 final Supplier<String> queryNodePaths = syntheticDataset
                         ? syntheticTreeQueryNodePaths(workload)
                         : aemDataset
-                        ? throwException()
-                        : throwException();
+                        ? aemQueryNodePaths(aemNodesSupplier.get(), workload)
+                        : throwException("no query node path supplier");
 
                 final Supplier<Long> millisSinceWarmUpStart = millisSinceNow();
+
+                if (GC) {
+                    gcTimer.schedule(
+                            gcTimerTask(
+                                    nodeStore,
+                                    "/oak:index/pub/:index/pub",
+                                    noOpBi()
+                            ),
+                            0,
+                            GCPeriodicity
+                    );
+                }
 
                 LOG.debug("warm-up starting");
                 if (millisMode) {
@@ -206,7 +230,7 @@ public class App {
                         ? () -> millisSinceWarmUpStart.get() < warmUpMillis
                         : tickMode
                         ? () -> warmUpTickCounter.get() < warmUpTicks
-                        : throwException();
+                        : throwException("no warmup loop condition provider");
 
                 while (warmUpLoopCondition.get()) {
                     warmUpTick.run();
@@ -229,8 +253,28 @@ public class App {
                         ? millisSinceExperimentStart
                         : tickMode
                         ? experimentTickCounter::get
-                        : throwException()
+                        : throwException("no time supplier")
                 );
+
+                if (GC) {
+                    gcTimer.cancel();
+                    gcTimer.schedule(
+                            gcTimerTask(
+                                    nodeStore,
+                                    "/oak:index/pub/:index/pub",
+                                    (Long delta, Long nCleanedNodes) -> {
+                                        if (benchmarkGCMillis) {
+                                            dataLogger.accept(delta.toString());
+                                        }
+                                        if (benchmarkGCCleanedNodes) {
+                                            dataLogger.accept(nCleanedNodes.toString());
+                                        }
+                                    }
+                            ),
+                            0,
+                            GCPeriodicity
+                    );
+                }
 
                 final Runnable experimentTick = experimentTickFactory(
                         clusterNode,
@@ -244,7 +288,7 @@ public class App {
                         ? () -> millisSinceExperimentStart.get() < experimentMillis
                         : tickMode
                         ? () -> experimentTickCounter.get() < experimentTicks
-                        : throwException();
+                        : throwException("no experiment loop condition supplier");
 
                 while (experimentLoopCondition.get()) {
                     experimentTick.run();
@@ -359,6 +403,18 @@ public class App {
                                 (DocumentNodeState node, String path) -> n.getAndIncrement()
                         );
                         dataLogger.accept(Long.toString(n.get()));
+                    }
+                    if (benchmarkVolatileNodes) {
+                        final AtomicLong nVolatileNodes = new AtomicLong(0L);
+                        PostOrder(
+                                nodeStore,
+                                "/oak:index/pub/:index/now",
+                                (DocumentNodeState node, String path) -> {
+                                    if (node.isVolatile()) {
+                                        nVolatileNodes.getAndIncrement();
+                                    }
+                                });
+                        dataLogger.accept(Long.toString(nVolatileNodes.get()));
                     }
                 }
         );
@@ -488,27 +544,30 @@ public class App {
      *                  2) the number of nodes cleaned during execution as 2nd parameter
      * @return
      */
-    public Runnable cleanUnproductiveNodes(
+    public static TimerTask gcTimerTask(
             DocumentNodeStore nodeStore,
             String absPath,
             BiConsumer<Long, Long> hook
     ) {
-        return () -> {
-            final Supplier<Long> delta = millisSinceNow();
-            final AtomicLong nCleanedNodes = new AtomicLong();
-            Accumulate(nodeStore, absPath, (DocumentNodeState node, String path, Iterable<Boolean> accumulator) -> {
-                boolean hasChild = false;
-                for (boolean isChildRemoved : accumulator) {
-                    hasChild |= !isChildRemoved;
-                }
-                if (!hasChild && !node.hasProperty("match") && !node.isVolatile()) {
-                    nCleanedNodes.getAndIncrement();
-                    node.builder().remove();
-                    return true;
-                }
-                return false;
-            });
-            hook.accept(delta.get(), nCleanedNodes.get());
+        return new TimerTask() {
+            @Override
+            public void run() {
+                final Supplier<Long> delta = millisSinceNow();
+                final AtomicLong nCleanedNodes = new AtomicLong();
+                Accumulate(nodeStore, absPath, (DocumentNodeState node, String path, Iterable<Boolean> accumulator) -> {
+                    boolean hasChild = false;
+                    for (boolean isChildRemoved : accumulator) {
+                        hasChild |= !isChildRemoved;
+                    }
+                    if (!hasChild && !node.hasProperty("match") && !node.isVolatile()) {
+                        nCleanedNodes.getAndIncrement();
+                        node.builder().remove();
+                        return true;
+                    }
+                    return false;
+                });
+                hook.accept(delta.get(), nCleanedNodes.get());
+            }
         };
     }
 
@@ -553,6 +612,28 @@ public class App {
         });
     }
 
+    public static Supplier<String> aemQueryNodePaths(String[] aemNodes, Supplier<Long> workloadSupplier) {
+        return pickFromArray(
+                Arrays.copyOfRange(
+                        aemNodes,
+                        0,
+                        lastNode(topLevels)
+                ),
+                workloadSupplier
+        );
+    }
+
+    public static Supplier<String> aemWriteNodePaths(String[] aemNodes, Supplier<Long> workloadSupplier) {
+        return pickFromArray(
+                Arrays.copyOfRange(
+                        aemNodes,
+                        firstNode(depth - bottomLevels),
+                        lastNode(depth)
+                ),
+                workloadSupplier
+        );
+    }
+
     public static Supplier<String> pickFromArray(String[] paths, Supplier<Long> workloadSupplier) {
         IntegerDistribution zipf = new ZipfDistribution(paths.length, 1);
         HashFunction hashFunction = Hashing.murmur3_32();
@@ -582,7 +663,7 @@ public class App {
                     .putLong(workload)
                     .putInt(zipfSample)
                     .hash();
-            final int k = Hashing.consistentHash(hashCode, nBottomNodes);
+            final int k = Hashing.consistentHash(hashCode, nBottomNodes) + firstNode(depth - bottomLevels);
             final String relativePath = mapToPath(k);
             return PathUtils.concat(contentRootPath, relativePath);
         };

@@ -170,9 +170,9 @@ public class Utils {
         return i < bins ? i : clusterNode;
     }
 
-    public static <R> Supplier<R> throwException() {
+    public static <R> Supplier<R> throwException(String message) {
         return () -> {
-            throw new RuntimeException("not implemented yet");
+            throw new RuntimeException(message);
         };
     }
 
