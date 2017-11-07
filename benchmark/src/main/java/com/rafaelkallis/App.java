@@ -6,9 +6,13 @@ import com.google.common.hash.Hashing;
 import com.mongodb.DB;
 import com.mongodb.MongoClient;
 import com.rafaelkallis.shared.ClusterNode;
+import com.rafaelkallis.shared.Consumer;
 import com.rafaelkallis.shared.Utils;
+import org.apache.commons.csv.CSVFormat;
+import org.apache.commons.csv.CSVPrinter;
 import org.apache.commons.math3.distribution.IntegerDistribution;
 import org.apache.commons.math3.distribution.ZipfDistribution;
+import org.apache.commons.math3.stat.descriptive.moment.Mean;
 import org.apache.jackrabbit.oak.api.CommitFailedException;
 import org.apache.jackrabbit.oak.api.ResultRow;
 import org.apache.jackrabbit.oak.api.Tree;
@@ -28,8 +32,7 @@ import java.text.ParseException;
 import java.time.Instant;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.function.BiConsumer;
-import java.util.function.Consumer;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.function.Supplier;
 
@@ -40,59 +43,68 @@ public class App {
 
     static final Logger LOG = LoggerFactory.getLogger(App.class);
 
-    static final String time = System.getProperty("time", "millis");
-    static final boolean millisMode = time.equals("millis");
-    static final boolean tickMode = time.equals("tick");
-    static final int fanout = Integer.getInteger("fanout", 2);
-    static final int depth = Integer.getInteger("depth", 20);
     static final int templateFanout = Integer.getInteger("templateFanout", 2);
     static final int templateDepth = Integer.getInteger("templateDepth", 20);
     static final String templateName = System.getProperty("templateName", "oak-template");
+
+    static final int fanout = Integer.getInteger("fanout", 2);
+    static final int depth = Integer.getInteger("depth", 20);
+    static final int skew = Integer.getInteger("skew", 1);
     static final int topLevels = Integer.getInteger("topLevels", 1);
     static final int bottomLevels = Integer.getInteger("bottomLevels", 1);
     static final int clusterId = Integer.getInteger("clusterId", 2);
     static final int volatilityThreshold = Integer.getInteger("volatilityThreshold", 5);
+    static final int slidingWindowLength = Integer.getInteger("slidingWindowLength", 30 * 1000);
+
     static final long warmUpMillis = Long.getLong("warmUpMillis", 0);
     static final long warmUpTicks = Long.getLong("warmUpTicks", 0);
-    static final int slidingWindowLength = Integer.getInteger("slidingWindowLength", 30 * 1000);
-    static final int skew = Integer.getInteger("skew", 1);
+
     static final int writesPerTick = Integer.getInteger("writesPerTick", 10);
     static final int queriesPerTick = Integer.getInteger("queriesPerTick", 1);
+
     static final long experimentMillis = Long.getLong("experimentMillis", 5 * 60 * 1000);
     static final long workloadMillis = Long.getLong("workloadMillis", 30 * 1000);
     static final long experimentTicks = Long.getLong("experimentTicks", 500);
     static final long workloadTicks = Long.getLong("workloadTicks", 100);
+
     static final String mongoUri = System.getProperty("mongoUri", "mongodb://localhost");
     static final String mongoName = System.getProperty("mongoName", "oak");
     static final String contentRootPath = System.getProperty("contentRootPath", "/content");
-    static final String benchmark = System.getProperty("benchmark", "none");
-    static final boolean benchmarkQueryTimes = benchmark.equals("query_times");
-    static final boolean benchmarkWriteTimes = benchmark.equals("write_times");
-    static final boolean benchmarkUnproductiveNodes = benchmark.equals("unproductive_nodes");
-    static final boolean benchmarkQueryUnproductiveNodes = benchmark.equals("query_unproductive_nodes");
-    static final boolean benchmarkIndexNodes = benchmark.equals("index_nodes");
-    static final boolean benchmarkTicks = benchmark.equals("ticks");
-    static final boolean benchmarkVolatileNodes = benchmark.equals("volatile_nodes");
-    static final boolean benchmarkGCMillis = benchmark.equals("benchmark_gc_millis");
-    static final boolean benchmarkGCCleanedNodes = benchmark.equals("benchmark_gc_cleaned_nodes");
-    static final boolean benchmarkQTPCleanedNodes = benchmark.equals("benchmark_qtp_cleaned_nodes");
+
+    static final boolean skipIndexBenchmark = Boolean.getBoolean("skipIndexBenchmark");
+    //    static final String benchmark = System.getProperty("benchmark", "none");
+//    static final boolean benchmarkQueryTimes = benchmark.equals("query_times");
+//    static final boolean benchmarkWriteTimes = benchmark.equals("write_times");
+//    static final boolean benchmarkUnproductiveNodes = benchmark.equals("unproductive_nodes");
+//    static final boolean benchmarkQueryUnproductiveNodes = benchmark.equals("query_unproductive_nodes");
+//    static final boolean benchmarkIndexNodes = benchmark.equals("index_nodes");
+//    static final boolean benchmarkTicks = benchmark.equals("ticks");
+//    static final boolean benchmarkVolatileNodes = benchmark.equals("volatile_nodes");
+//    static final boolean benchmarkGCMillis = benchmark.equals("benchmark_gc_millis");
+//    static final boolean benchmarkGCCleanedNodes = benchmark.equals("benchmark_gc_cleaned_nodes");
+//    static final boolean benchmarkQTPCleanedNodes = benchmark.equals("benchmark_qtp_cleaned_nodes");
     static final Boolean skipInitialize = Boolean.getBoolean("skipInitialize");
-    static final String writeMode = System.getProperty("writeMode", "toggle");
-    static final Boolean toggleWriteMode = writeMode.equals("toggle");
-    static final String queryMode = System.getProperty("queryMode", "external");
-    static final boolean nativeQueryMode = queryMode.equals("native");
-    static final boolean externalQueryMode = queryMode.equals("external");
+    //    static final String writeMode = System.getProperty("writeMode", "toggle");
+//    static final Boolean toggleWriteMode = writeMode.equals("toggle");
+//    static final String queryMode = System.getProperty("queryMode", "external");
+//    static final boolean nativeQueryMode = queryMode.equals("native");
+//    static final boolean externalQueryMode = queryMode.equals("external");
     static final String dataset = System.getProperty("dataset", "synthetic");
     static final boolean syntheticDataset = dataset.equals("synthetic");
     static final boolean aemDataset = dataset.equals("aem");
-    static final String outFileName = System.getProperty("outFileName", String.format("output_%s_%d_%s_tau%d_L%d", benchmark, System.currentTimeMillis() / 1000L, dataset, volatilityThreshold, slidingWindowLength));
+    static final String outFileName = System.getProperty("outFileName", String.format("output_%d_%s_tau%d_L%d", System.currentTimeMillis() / 1000L, dataset, volatilityThreshold, slidingWindowLength));
     static final boolean QTP = Boolean.getBoolean("QTP");
     static final boolean GC = Boolean.getBoolean("GC");
     static final long GCPeriodicity = Long.getLong("GCPeriodicity", 30 * 1000);
 
+    static final String workloadMode = System.getProperty("workloadMode", "tick");
+    static final boolean tickMode = workloadMode.equals("tick");
+    static final boolean millisMode = workloadMode.equals("millis");
+    static final boolean noMode = workloadMode.equals("none");
+
     public static void main(String[] args) throws CommitFailedException, IOException, ParseException {
 
-        LOG.debug("time: {}", time);
+        LOG.debug("workloadMode: {}", workloadMode);
         LOG.debug("fanout: {}", fanout);
         LOG.debug("depth: {}", depth);
         LOG.debug("templateFanout: {}", templateFanout);
@@ -115,10 +127,10 @@ public class App {
         LOG.debug("mongoUri: {}", mongoUri);
         LOG.debug("mongoName: {}", mongoName);
         LOG.debug("contentRootPath: {}", contentRootPath);
-        LOG.debug("benchmark: {}", benchmark);
+//        LOG.debug("benchmark: {}", benchmark);
         LOG.debug("outFileName: {}", outFileName);
         LOG.debug("skipInitialize: {}", skipInitialize);
-        LOG.debug("queryMode: {}", queryMode);
+//        LOG.debug("queryMode: {}", queryMode);
         LOG.debug("dataset: {}", dataset);
         LOG.debug("GC: {}", GC);
         LOG.debug("GCPeriodicity: {}", GCPeriodicity);
@@ -176,33 +188,45 @@ public class App {
                             .setSlidingWindowLength(slidingWindowLength)
 //                            .setPropertyIndexCleanUpProps("pub")
                             .getNodeStore();
-                    final FileWriter out = new FileWriter(outFileName)
+                    final CSVPrinter tickData = new CSVPrinter(new FileWriter(outFileName), CSVFormat.DEFAULT)
             ) {
+                List<String> headers = new LinkedList<>();
+                headers.add("tick");
+                headers.add("traversed_index_nodes");
+                headers.add("traversed_volatile_nodes");
+                headers.add("traversed_unproductive_nodes");
+                headers.add("index_nodes");
+                headers.add("volatile_nodes");
+                headers.add("unproductive_nodes");
+                tickData.printRecord(headers);
+
                 final ClusterNode clusterNode = new ClusterNode(nodeStore);
 
                 final Timer gcTimer = new Timer();
 
                 final Supplier<String[]> aemNodesSupplier = aemNodes(clusterNode);
 
-                final AtomicLong warmUpTickCounter = new AtomicLong(0);
-                final AtomicLong experimentTickCounter = new AtomicLong(0);
+                final AtomicLong warmUpTickCounter = new AtomicLong();
+                final AtomicLong experimentTickCounter = new AtomicLong();
 
-                final Supplier<Long> workload = millisMode
-                        ? millisAwareWorkload()
-                        : tickMode
+                final Supplier<Long> workloadSupplier = tickMode
                         ? tickAwareWorkload(experimentTickCounter::get)
-                        : noWorkload();
+                        : millisMode
+                        ? millisAwareWorkload()
+                        : noMode
+                        ? noWorkload()
+                        : throwException("invalid workload supplier defined");
 
                 final Supplier<String> writeNodePaths = syntheticDataset
-                        ? syntheticTreeWriteNodePaths(workload)
+                        ? syntheticTreeWriteNodePaths(workloadSupplier)
                         : aemDataset
-                        ? aemWriteNodePaths(aemNodesSupplier.get(), workload)
+                        ? aemWriteNodePaths(aemNodesSupplier.get(), workloadSupplier)
                         : throwException("no write node path supplier");
 
                 final Supplier<String> queryNodePaths = syntheticDataset
-                        ? syntheticTreeQueryNodePaths(workload)
+                        ? syntheticTreeQueryNodePaths(workloadSupplier)
                         : aemDataset
-                        ? aemQueryNodePaths(aemNodesSupplier.get(), workload)
+                        ? aemQueryNodePaths(aemNodesSupplier.get(), workloadSupplier)
                         : throwException("no query node path supplier");
 
                 final Supplier<Long> millisSinceWarmUpStart = millisSinceNow();
@@ -212,7 +236,7 @@ public class App {
                             gcTimerTask(
                                     nodeStore,
                                     "/oak:index/pub/:index/pub",
-                                    noOpBi()
+                                    Consumer.Two.noOp()
                             ),
                             0,
                             GCPeriodicity
@@ -249,12 +273,12 @@ public class App {
                     LOG.debug("experiment finishing at {}", Instant.now().plusMillis(experimentMillis));
                 }
 
-                final Consumer<String> dataLogger = dataLoggerFactory(out, millisMode
-                        ? millisSinceExperimentStart
-                        : tickMode
-                        ? experimentTickCounter::get
-                        : throwException("no time supplier")
-                );
+//                final Consumer.One<String> dataLogger = dataLoggerFactory(out, millisMode
+//                        ? millisSinceExperimentStart
+//                        : tickMode
+//                        ? experimentTickCounter::get
+//                        : throwException("no time supplier")
+//                );
 
                 if (GC) {
                     gcTimer.cancel();
@@ -263,12 +287,12 @@ public class App {
                                     nodeStore,
                                     "/oak:index/pub/:index/pub",
                                     (Long delta, Long nCleanedNodes) -> {
-                                        if (benchmarkGCMillis) {
-                                            dataLogger.accept(delta.toString());
-                                        }
-                                        if (benchmarkGCCleanedNodes) {
-                                            dataLogger.accept(nCleanedNodes.toString());
-                                        }
+//                                        if (benchmarkGCMillis) {
+//                                            dataLogger.accept(delta.toString());
+//                                        }
+//                                        if (benchmarkGCCleanedNodes) {
+//                                            dataLogger.accept(nCleanedNodes.toString());
+//                                        }
                                     }
                             ),
                             0,
@@ -281,7 +305,13 @@ public class App {
                         nodeStore,
                         writeNodePaths,
                         queryNodePaths,
-                        dataLogger
+                        (queryRuntime, travIndexNodex, travVolatileNodes, travUnproductiveNodes, indexNodes, volatileNodes, unproductiveNodes) -> {
+                            try {
+                                tickData.printRecord(queryRuntime, travIndexNodex, travVolatileNodes, travUnproductiveNodes, indexNodes, volatileNodes, unproductiveNodes);
+                            } catch (IOException e) {
+                                LOG.error("io exception", e);
+                            }
+                        }
                 );
 
                 final Supplier<Boolean> experimentLoopCondition = millisMode
@@ -299,29 +329,9 @@ public class App {
                 }
 
                 LOG.debug("experiment finished");
+                gcTimer.cancel();
             }
         }
-    }
-
-    public static Consumer<String> writeOpFactory(
-            final ClusterNode clusterNode,
-            final Consumer<Long> hook
-    ) {
-        return toggleWriteMode
-                ? toggleProperty(clusterNode, hook)
-                : noOp();
-    }
-
-    public static Function<String, Set<String>> queryOpFactory(
-            final ClusterNode o,
-            final DocumentNodeStore nodeStore,
-            final BiConsumer<Long, Long> hook
-    ) {
-        return externalQueryMode
-                ? externalQuery(nodeStore, hook)
-                : nativeQueryMode
-                ? nativeQuery(o, hook)
-                : noOp(new HashSet<>());
     }
 
     public static Runnable warmUpTickFactory(
@@ -331,8 +341,8 @@ public class App {
             final Supplier<String> queryNodePaths
     ) {
 
-        final Consumer<String> writeOp = writeOpFactory(clusterNode, noOp());
-        final Function<String, Set<String>> queryOp = queryOpFactory(clusterNode, nodeStore, noOpBi());
+        final Consumer.One<String> writeOp = toggleProperty(clusterNode);
+        final Function<String, Set<String>> queryOp = externalQuery(nodeStore, Consumer.Four.noOp());
 
         return tickFactory(
                 writeNodePaths,
@@ -341,7 +351,7 @@ public class App {
                 queryNodePaths,
                 queryOp,
                 queriesPerTick,
-                noOp()
+                Consumer.Zero.noOp()
         );
     }
 
@@ -350,22 +360,23 @@ public class App {
             final DocumentNodeStore nodeStore,
             final Supplier<String> writeNodePaths,
             final Supplier<String> queryNodePaths,
-            final Consumer<String> dataLogger
+            final Consumer.Seven<Double, Double, Double, Double, Long, Long, Long> hook
     ) {
-        final Consumer<String> writeOp = writeOpFactory(clusterNode, delta -> {
-            if (benchmarkWriteTimes) {
-                dataLogger.accept(delta.toString());
-            }
-        });
+        final AtomicReference<Mean> meanQueryRuntime = new AtomicReference<>(new Mean());
+        final AtomicReference<Mean> meanTraversedIndexNodes = new AtomicReference<>(new Mean());
+        final AtomicReference<Mean> meanTraversedVolatileIndexNodes = new AtomicReference<>(new Mean());
+        final AtomicReference<Mean> meanTraversedUnproductiveIndexNodes = new AtomicReference<>(new Mean());
 
-        final Function<String, Set<String>> queryOp = queryOpFactory(clusterNode, nodeStore, (delta, nUnproductiveNodes) -> {
-            if (benchmarkQueryTimes) {
-                dataLogger.accept(delta.toString());
-            }
-            if (benchmarkQueryUnproductiveNodes) {
-                dataLogger.accept(nUnproductiveNodes.toString());
-            }
-        });
+        final Consumer.One<String> writeOp = toggleProperty(clusterNode);
+
+        final Function<String, Set<String>> queryOp = externalQuery(
+                nodeStore,
+                (queryRuntime, traversedIndexNodes, traversedVolatileNodes, traversedUnproductiveNodes) -> {
+                    meanQueryRuntime.get().increment(queryRuntime);
+                    meanTraversedIndexNodes.get().increment(traversedIndexNodes);
+                    meanTraversedVolatileIndexNodes.get().increment(traversedVolatileNodes);
+                    meanTraversedUnproductiveIndexNodes.get().increment(traversedUnproductiveNodes);
+                });
 
         return tickFactory(
                 writeNodePaths,
@@ -374,47 +385,50 @@ public class App {
                 queryNodePaths,
                 queryOp,
                 queriesPerTick,
-                delta -> {
-                    if (benchmarkTicks) {
-                        dataLogger.accept(delta.toString());
-                    }
-                    if (benchmarkUnproductiveNodes) {
-                        final AtomicLong n = new AtomicLong(0L);
+                () -> {
+                    if (skipIndexBenchmark) {
+                        hook.accept(
+                                meanQueryRuntime.get().getResult(),
+                                meanTraversedIndexNodes.get().getResult(),
+                                meanTraversedVolatileIndexNodes.get().getResult(),
+                                meanTraversedUnproductiveIndexNodes.get().getResult(),
+                                null,
+                                null,
+                                null
+                        );
+                    } else {
+                        final AtomicLong indexNodes = new AtomicLong();
+                        final AtomicLong volatileNodes = new AtomicLong();
+                        final AtomicLong unproductiveNodes = new AtomicLong();
                         Accumulate(
                                 nodeStore,
                                 "/oak:index/pub/:index/now",
                                 (DocumentNodeState node, String path, Iterable<Boolean> accumulator) -> {
-                                    boolean isUnproductive = !node.hasProperty("match") && !node.isVolatile();
+                                    final boolean isMatching = node.getBoolean("match");
+                                    final boolean isVolatile = node.isVolatile();
+                                    boolean isUnproductive = !isMatching && !isVolatile;
                                     for (boolean isChildUnproductive : accumulator) {
                                         isUnproductive &= isChildUnproductive;
                                     }
-                                    if (isUnproductive) {
-                                        n.getAndIncrement();
+
+                                    indexNodes.getAndIncrement();
+                                    if (isVolatile) {
+                                        volatileNodes.getAndIncrement();
+                                    } else if (isUnproductive) {
+                                        unproductiveNodes.getAndIncrement();
                                     }
                                     return isUnproductive;
                                 });
-                        dataLogger.accept(Long.toString(n.get()));
-                    }
-                    if (benchmarkIndexNodes) {
-                        final AtomicLong n = new AtomicLong(0L);
-                        PostOrder(
-                                nodeStore,
-                                "/oak:index/pub/:index/now",
-                                (DocumentNodeState node, String path) -> n.getAndIncrement()
+
+                        hook.accept(
+                                meanQueryRuntime.get().getResult(),
+                                meanTraversedIndexNodes.get().getResult(),
+                                meanTraversedVolatileIndexNodes.get().getResult(),
+                                meanTraversedUnproductiveIndexNodes.get().getResult(),
+                                indexNodes.get(),
+                                volatileNodes.get(),
+                                unproductiveNodes.get()
                         );
-                        dataLogger.accept(Long.toString(n.get()));
-                    }
-                    if (benchmarkVolatileNodes) {
-                        final AtomicLong nVolatileNodes = new AtomicLong(0L);
-                        PostOrder(
-                                nodeStore,
-                                "/oak:index/pub/:index/now",
-                                (DocumentNodeState node, String path) -> {
-                                    if (node.isVolatile()) {
-                                        nVolatileNodes.getAndIncrement();
-                                    }
-                                });
-                        dataLogger.accept(Long.toString(nVolatileNodes.get()));
                     }
                 }
         );
@@ -422,71 +436,80 @@ public class App {
 
     public static Runnable tickFactory(
             Supplier<String> writeNodePaths,
-            Consumer<String> writeOp,
+            Consumer.One<String> writeOp,
             final int writesPerTick,
             Supplier<String> queryNodePaths,
             Function<String, Set<String>> queryOp,
             final int queriesPerTick,
-            Consumer<Long> hook
+            Consumer.Zero hook
     ) {
         return () -> {
-            final Supplier<Long> delta = millisSinceNow();
+            final Set<String> q = new HashSet<>();
             for (int i = 0; i < writesPerTick; i++) {
-                writeOp.accept(writeNodePaths.get());
+                final String writeNodePath = writeNodePaths.get();
+                writeOp.accept(writeNodePath);
+
+                if (q.contains(writeNodePath)) {
+                    q.remove(writeNodePath);
+                } else {
+                    q.add(writeNodePath);
+                }
             }
+
+            // drain pending updates
+            for (String writeNodePath : q) {
+                writeOp.accept(writeNodePath);
+            }
+
+            // query
             for (int i = 0; i < queriesPerTick; i++) {
                 queryOp.apply(queryNodePaths.get());
             }
-            hook.accept(delta.get());
+            hook.accept();
         };
     }
 
-    public static Consumer<String> toggleProperty(
-            final ClusterNode clusterNode,
-            final Consumer<Long> hook
-    ) {
+    public static Consumer.One<String> toggleProperty(final ClusterNode clusterNode) {
         return (path) -> {
             try {
-                final Supplier<Long> delta = millisSinceNow();
                 clusterNode.transaction(root -> {
                     Utils.toggleProperty(root.getTree(path));
                 }).commit();
-                hook.accept(delta.get());
             } catch (CommitFailedException e) {
                 LOG.error("commit failed", e);
             }
         };
     }
 
-    public static Function<String, Set<String>> nativeQuery(
-            final ClusterNode o,
-            final BiConsumer<Long, Long> hook
-    ) {
-        return (String path) -> {
-            final Supplier<Long> delta = millisSinceNow();
-            final Set<String> resultSet = new HashSet<>();
-            try {
-                o.transaction(root -> {
-                    try {
-                        for (ResultRow resultRow : root.getQueryEngine().executeQuery(
-                                path + "/*[@pub='now']",
-                                Query.XPATH,
-                                Collections.emptyMap(),
-                                Collections.emptyMap()
-                        ).getRows()) {
-                            resultSet.add(resultRow.getPath());
-                        }
-                    } catch (ParseException e) {
-                        LOG.error("parse exception", e);
-                    }
-                }).commit();
-            } catch (CommitFailedException e) {
-                LOG.error("commit failed", e);
-            }
-            hook.accept(delta.get(), null);
-            return resultSet;
-        };
-    }
+//    public static Function<String, Set<String>> nativeQuery(
+//            final ClusterNode o,
+//            final BiConsumer<Long, Long> hook
+//    ) {
+//        return (String path) -> {
+//            final Supplier<Long> delta = millisSinceNow();
+//            final Set<String> resultSet = new HashSet<>();
+//            try {
+//                o.transaction(root -> {
+//                    try {
+//                        for (ResultRow resultRow : root.getQueryEngine().executeQuery(
+//                                path + "/*[@pub='now']",
+//                                Query.XPATH,
+//                                Collections.emptyMap(),
+//                                Collections.emptyMap()
+//                        ).getRows()) {
+//                            resultSet.add(resultRow.getPath());
+//                        }
+//                    } catch (ParseException e) {
+//                        LOG.error("parse exception", e);
+//                    }
+//                }).commit();
+//            } catch (CommitFailedException e) {
+//                LOG.error("commit failed", e);
+//            }
+//            hook.accept(delta.get(), null);
+//            return resultSet;
+//        };
+//    }
 
     /**
      * Runs Query in external mode.
@@ -501,35 +524,44 @@ public class App {
      */
     public static Function<String, Set<String>> externalQuery(
             final DocumentNodeStore documentNodeStore,
-            final BiConsumer<Long, Long> hook
+            final Consumer.Four<Long, Long, Long, Long> hook
     ) {
         final String parentPath = "/oak:index/pub/:index/now";
         return (String contentPath) -> {
-            final Supplier<Long> delta = millisSinceNow();
             final Set<String> resultSet = new HashSet<>();
-            final AtomicLong nUnproductiveNodes = new AtomicLong();
+            final Supplier<Long> runtime = millisSinceNow();
+            final AtomicLong traversedIndexNodes = new AtomicLong();
+            final AtomicLong traversedVolatileNodes = new AtomicLong();
+            final AtomicLong traversedUnproductiveNodes = new AtomicLong();
             Accumulate(
                     documentNodeStore,
                     PathUtils.concat(parentPath, PathUtils.relativize("/", contentPath)),
                     (DocumentNodeState node, String path, Iterable<Boolean> accumulator) -> {
                         final boolean isMatching = node.getBoolean("match");
+                        final boolean isVolatile = node.isVolatile();
                         if (isMatching) {
                             resultSet.add(PathUtils.relativize(parentPath, path));
                         }
-                        boolean isUnproductive = !isMatching && !node.isVolatile();
+                        boolean isUnproductive = !isMatching && !isVolatile;
                         for (boolean isChildUnproductive : accumulator) {
                             isUnproductive &= isChildUnproductive;
                         }
-                        if (isUnproductive) {
-                            nUnproductiveNodes.getAndIncrement();
 
-                            if (QTP) {
-                                node.builder().remove();
-                            }
+
+                        if (isUnproductive && QTP) {
+                            node.builder().remove();
                         }
+
+                        traversedIndexNodes.getAndIncrement();
+                        if (isVolatile) {
+                            traversedVolatileNodes.getAndIncrement();
+                        } else if (isUnproductive) {
+                            traversedUnproductiveNodes.getAndIncrement();
+                        }
+
                         return isUnproductive;
                     });
-            hook.accept(delta.get(), nUnproductiveNodes.get());
+            hook.accept(runtime.get(), traversedIndexNodes.get(), traversedVolatileNodes.get(), traversedUnproductiveNodes.get());
             return resultSet;
         };
     }
@@ -547,7 +579,7 @@ public class App {
     public static TimerTask gcTimerTask(
             DocumentNodeStore nodeStore,
             String absPath,
-            BiConsumer<Long, Long> hook
+            Consumer.Two<Long, Long> hook
     ) {
         return new TimerTask() {
             @Override
@@ -569,20 +601,6 @@ public class App {
                 hook.accept(delta.get(), nCleanedNodes.get());
             }
         };
-    }
-
-    public static <R> Consumer<R> noOp() {
-        return o -> {
-        };
-    }
-
-    public static <T1, T2> BiConsumer<T1, T2> noOpBi() {
-        return (o1, o2) -> {
-        };
-    }
-
-    public static <T, R> Function<T, R> noOp(R dummy) {
-        return o -> dummy;
     }
 
     public static Supplier<Long> millisAwareWorkload() {
@@ -706,19 +724,6 @@ public class App {
             final int k = Hashing.consistentHash(hashCode, nTopNodes);
             final String relativePath = mapToPath(k);
             return PathUtils.concat(contentRootPath, relativePath);
-        };
-    }
-
-    public static Consumer<String> dataLoggerFactory(
-            FileWriter fileWriter,
-            Supplier<Long> experimentTime
-    ) {
-        return data -> {
-            try {
-                fileWriter.append(experimentTime.get().toString()).append(',').append(data).append('\n');
-            } catch (IOException e) {
-                LOG.error("io exception", e);
-            }
         };
     }
 }
