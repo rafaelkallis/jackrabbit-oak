@@ -1,18 +1,16 @@
 package com.rafaelkallis.shared;
 
-import org.apache.jackrabbit.oak.api.Tree;
-import org.apache.jackrabbit.oak.commons.PathUtils;
-import org.apache.jackrabbit.oak.plugins.document.DocumentNodeState;
-import org.apache.jackrabbit.oak.plugins.document.DocumentNodeStore;
-import org.apache.jackrabbit.oak.spi.state.NodeState;
+import static com.rafaelkallis.shared.Utils.childNodes;
+import static com.rafaelkallis.shared.Utils.getNode;
 
 import java.util.Iterator;
 import java.util.function.BiConsumer;
-import java.util.function.BiFunction;
 import java.util.function.Consumer;
 
-import static com.rafaelkallis.shared.Utils.childNodes;
-import static com.rafaelkallis.shared.Utils.getNode;
+import org.apache.jackrabbit.oak.api.Tree;
+import org.apache.jackrabbit.oak.commons.PathUtils;
+import org.apache.jackrabbit.oak.spi.state.NodeState;
+import org.apache.jackrabbit.oak.spi.state.NodeStore;
 
 public class TraverseUtils {
 
@@ -26,7 +24,7 @@ public class TraverseUtils {
             final Tree root,
             final Consumer<Tree> func
     ) {
-        Iterator<Tree> levelOrder = LevelOrder(root);
+		Iterator<Tree> levelOrder = LevelOrder(root);
         while (levelOrder.hasNext()) {
             func.accept(levelOrder.next());
         }
@@ -35,7 +33,7 @@ public class TraverseUtils {
     public static Iterator<Tree> LevelOrder(final Tree root) {
         final MutableIterator<Tree> nodes = new MutableIterator<>(root);
         return new Iterator<Tree>() {
-            @Override
+            // @Override
             public boolean hasNext() {
                 return nodes.hasNext();
             }
@@ -110,23 +108,23 @@ public class TraverseUtils {
     }
 
     public static <R> R Accumulate(
-            final DocumentNodeStore documentNodeStore,
+            final NodeStore nodeStore,
             final String absPath,
-            final TriFunction<DocumentNodeState, String, Iterable<R>, R> func
+            final TriFunction<NodeState, String, Iterable<R>, R> func
     ) {
         return Accumulate(
-                getNode(documentNodeStore, absPath),
+                getNode(nodeStore, absPath),
                 absPath,
                 func
         );
     }
 
     public static void PreOrder(
-            final DocumentNodeStore nodeStore,
+            final NodeStore nodeStore,
             final String absPath,
-            BiConsumer<DocumentNodeState, String> func
+            BiConsumer<NodeState, String> func
     ) {
-        Accumulate(nodeStore, absPath, (DocumentNodeState nodeState, String path, Iterable<Void> res) -> {
+        Accumulate(nodeStore, absPath, (NodeState nodeState, String path, Iterable<Void> res) -> {
             func.accept(nodeState, path);
             for (Void _ : res) {
             }
@@ -135,11 +133,11 @@ public class TraverseUtils {
     }
 
     public static void PostOrder(
-            final DocumentNodeStore nodeStore,
+            final NodeStore nodeStore,
             final String absPath,
-            BiConsumer<DocumentNodeState, String> func
+            BiConsumer<NodeState, String> func
     ) {
-        Accumulate(nodeStore, absPath, (DocumentNodeState nodeState, String path, Iterable<Void> res) -> {
+        Accumulate(nodeStore, absPath, (NodeState nodeState, String path, Iterable<Void> res) -> {
             for (Void _ : res) {
             }
             func.accept(nodeState, path);
@@ -148,9 +146,9 @@ public class TraverseUtils {
     }
 
     private static <R> R Accumulate(
-            final DocumentNodeState node,
+            final NodeState node,
             final String absPath,
-            final TriFunction<DocumentNodeState, String, Iterable<R>, R> func
+            final TriFunction<NodeState, String, Iterable<R>, R> func
     ) {
         Iterable<String> childNodeNameIterable = node.getChildNodeNames();
         return func.apply(node, absPath, () -> {
@@ -165,7 +163,7 @@ public class TraverseUtils {
                 public R next() {
                     String childName = childNodeNameIterator.next();
                     return Accumulate(
-                            (DocumentNodeState) node.getChildNode(childName),
+                            node.getChildNode(childName),
                             PathUtils.concat(absPath, childName),
                             func
                     );
@@ -173,25 +171,4 @@ public class TraverseUtils {
             };
         });
     }
-
-//    public static <R> R PostOrder(
-//            final Tree node,
-//            final BiFunction<Tree, Iterable<R>, R> func
-//    ) {
-//        Iterable<Tree> children = node.getChildren();
-//        return func.apply(node, () -> {
-//            Iterator<Tree> childrenIt = children.iterator();
-//            return new Iterator<R>() {
-//                @Override
-//                public boolean hasNext() {
-//                    return childrenIt.hasNext();
-//                }
-//
-//                @Override
-//                public R next() {
-//                    return PostOrder(childrenIt.next(), func);
-//                }
-//            };
-//        });
-//    }
 }

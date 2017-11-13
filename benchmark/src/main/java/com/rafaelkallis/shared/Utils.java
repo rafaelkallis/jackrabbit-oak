@@ -1,11 +1,10 @@
 package com.rafaelkallis.shared;
 
+import org.apache.jackrabbit.oak.api.CommitFailedException;
 import org.apache.jackrabbit.oak.api.Root;
 import org.apache.jackrabbit.oak.api.Tree;
 import org.apache.jackrabbit.oak.api.Type;
 import org.apache.jackrabbit.oak.commons.PathUtils;
-import org.apache.jackrabbit.oak.plugins.document.DocumentNodeState;
-import org.apache.jackrabbit.oak.plugins.document.DocumentNodeStore;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
 import org.apache.jackrabbit.oak.spi.state.NodeStore;
 import org.slf4j.Logger;
@@ -17,8 +16,8 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 
-import static com.rafaelkallis.shared.TraverseUtils.PostOrder;
-import static com.rafaelkallis.shared.TraverseUtils.PreOrder;
+import static com.rafaelkallis.shared.TraverseUtils.*;
+
 import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.*;
 
 public class Utils {
@@ -52,7 +51,7 @@ public class Utils {
     ) {
         List<String> list = new ArrayList<>();
         final int rootDepth = PathUtils.getDepth(tree.getPath());
-        PreOrder(tree, (node) -> {
+        LevelOrder(tree, (node) -> {
             final int nodeDepth = PathUtils.getDepth(node.getPath()) - rootDepth;
             if (minDepth <= nodeDepth && nodeDepth < maxDepth) {
                 list.add(node.getPath());
@@ -61,12 +60,36 @@ public class Utils {
         return list.toArray(new String[list.size()]);
     }
 
-    public static void toggleProperty(final Tree node) {
-        if (node.hasProperty("pub")) {
-            node.removeProperty("pub");
-        } else {
-            node.setProperty("pub", "now");
-        }
+    public static Consumer.One<String> toggleProperty(ClusterNode clusterNode) {
+        return (path) -> {
+            try {
+                clusterNode.transaction(root -> {
+                        Tree node = root.getTree(path);
+                        if (node.hasProperty("pub")) {
+                            node.removeProperty("pub");
+                        } else {
+                            node.setProperty("pub", "now");
+                        }
+                    }).commit();
+            } catch (CommitFailedException e) {
+                LOG.error("commit failed", e);
+            }
+        };
+    }
+
+    public static Consumer.One<String> toggleTwice(ClusterNode clusterNode) {
+        return (path) -> {
+            try {
+                clusterNode.transaction(root -> {
+                        root.getTree(path).setProperty("pub", "now");
+                    }).commit();
+                clusterNode.transaction(root -> {
+                        root.getTree(path).removeProperty("pub");
+                    }).commit();
+            } catch (CommitFailedException e) {
+                LOG.error("commit failed", e);
+            }
+        };
     }
 
     public static void initializePropertyIndex(final Root root, final String propName) {
@@ -117,10 +140,10 @@ public class Utils {
         return path.toString();
     }
 
-    public static DocumentNodeState getNode(DocumentNodeStore nodeStore, String absPath) {
-        DocumentNodeState targetNode = nodeStore.getRoot();
+    public static NodeState getNode(NodeStore nodeStore, String absPath) {
+        NodeState targetNode = nodeStore.getRoot();
         for (String child : PathUtils.elements(absPath)) {
-            targetNode = (DocumentNodeState) targetNode.getChildNode(child);
+            targetNode = targetNode.getChildNode(child);
         }
         return targetNode;
     }
@@ -183,4 +206,35 @@ public class Utils {
     public static Supplier<Long> millisSince(final long start) {
         return () -> System.currentTimeMillis() - start;
     }
+
+    // public static Function<String, Set<String>> nativeQuery(
+    // final ClusterNode o,
+    // final BiConsumer<Long, Long> hook
+    // ) {
+    // return (String path) -> {
+    // final Supplier<Long> delta = millisSinceNow();
+    // final Set<String> resultSet = new HashSet<>();
+    // try {
+    // o.transaction(root -> {
+    // try {
+    // for (ResultRow resultRow : root.getQueryEngine().executeQuery(
+    // path + "/*[@pub='now']",
+    // Query.XPATH,
+    // Collections.emptyMap(),
+    // Collections.emptyMap()
+    // ).getRows()) {
+    // resultSet.add(resultRow.getPath());
+    // }
+    // } catch (ParseException e) {
+    // LOG.error("parse exception", e);
+    // }
+    // }).commit();
+    // } catch (CommitFailedException e) {
+    // LOG.error("commit failed", e);
+    // }
+    // hook.accept(delta.get(), null);
+    // return resultSet;
+    // };
+    // }
+
 }
