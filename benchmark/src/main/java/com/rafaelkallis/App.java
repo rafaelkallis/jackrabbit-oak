@@ -372,6 +372,10 @@ public class App {
                             meanTraversedVolatileIndexNodes.get().getResult(),
                             meanTraversedUnproductiveIndexNodes.get().getResult()
                             );
+                meanQueryRuntime.get().clear();
+                meanTraversedIndexNodes.get().clear();
+                meanTraversedVolatileIndexNodes.get().clear();
+                meanTraversedUnproductiveIndexNodes.get().clear();
             });
     }
 
