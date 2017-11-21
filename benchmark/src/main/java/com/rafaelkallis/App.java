@@ -129,7 +129,7 @@ public class App {
             return;
         }
 
-        initialize();
+        cloneTemplate();
 
         try (final DocumentNodeStore nodeStore = new DocumentMK.Builder()
              .setMongoDB(mongoUri, mongoName, 16)
@@ -425,13 +425,17 @@ public class App {
         return () -> 0L;
     }
 
-	public static Supplier<String> realQueryNodePaths(Supplier<Long> workloadSupplier) throws IOException {
+    public static Supplier<String> realQueryNodePaths(Supplier<Long> workloadSupplier) throws IOException {
+        LOG.debug("parsing paths for real dataset query workload");
         String[] paths = Files.lines(Paths.get(realUpdateWorkloadFile)).toArray(String[]::new);
+        LOG.debug("finished parsing");
         return pickFromArray(paths, workloadSupplier);
     }
 
-	public static Supplier<String> realUpdateNodePaths(Supplier<Long> workloadSupplier) throws IOException {
+    public static Supplier<String> realUpdateNodePaths(Supplier<Long> workloadSupplier) throws IOException {
+        LOG.debug("parsing paths for real dataset update workload");
         String[] paths = Files.lines(Paths.get(realQueryWorkloadFile)).toArray(String[]::new);
+        LOG.debug("finished parsing");
         return pickFromArray(paths, workloadSupplier);
     }
 
@@ -479,7 +483,7 @@ public class App {
         };
     }
 
-    public static void initialize() {
+    public static void cloneTemplate() {
         final String templateName = syntheticDataset
             ? templateNameSynthetic
             : realDataset
@@ -489,14 +493,15 @@ public class App {
         try (MongoClient mongoClient = new MongoClient()) {
             LOG.debug("dropping {}", mongoName);
             mongoClient.dropDatabase(mongoName);
+            LOG.debug("finished");
             LOG.debug("cloning {} to {}", templateName, mongoName);
             final Bson command = BsonDocument.parse(String.format("{ copydb: 1, fromdb: \"%s\", todb: \"%s\"}", templateName, mongoName));
             mongoClient.getDatabase("admin").runCommand(command);
-            LOG.debug("cloning finished");
+            LOG.debug("finished");
         }
     }
 
-    public static void generateSyntheticDataset() {
+    public static void generateSyntheticDataset() throws CommitFailedException, UnknownHostException {
         LOG.debug("generating synthetic dataset");
         try (final DocumentNodeStore nodeStore = new DocumentMK.Builder()
              .setMongoDB(mongoUri, templateNameSynthetic, 16)
@@ -505,19 +510,16 @@ public class App {
              .getNodeStore()) {
             ClusterNode clusterNode = new ClusterNode(nodeStore);
             clusterNode.transaction(root -> {
-                    LOG.debug("initializing property index");
+                    LOG.debug("- initializing property index");
                     initializePropertyIndex(root, "pub");
-                    LOG.debug("creating synthetic tree");
-                    Tree r = root.getTree("/");
-                    for (String label : PathUtils.elements(contentRootPath)) {
-                        r = r.addChild(label);
-                    }
-                    setUpCompleteTree(r, templateFanoutSynthetic, templateDepthSynthetic);
+                    LOG.debug("finished");
+                    LOG.debug("- generating synthetic dataset");
+                    Tree content = generatePath(root.getTree("/"), contentRootPath);
+                    setUpCompleteTree(content, fanout, depth);
+                    LOG.debug("finished");
+                    LOG.debug("- committing");
                 }).commit();
-        } catch (UnknownHostException e) {
-            LOG.error("unknown host exception", e);
-        } catch (CommitFailedException e) {
-            LOG.error("commit failed exception", e);
+            LOG.debug("finished");
         }
     }
 
@@ -531,15 +533,17 @@ public class App {
              .getNodeStore()){
             ClusterNode clusterNode = new ClusterNode(store);
             clusterNode.transaction(root -> {
-                    LOG.debug("started generating real dataset");
-				Tree content = generatePath(root.getTree("/"), contentRootPath);
+                    LOG.debug("- initializing property index");
+                    initializePropertyIndex(root, "pub");
+                    LOG.debug("- generating real dataset");
+                    Tree content = generatePath(root.getTree("/"), contentRootPath);
                     lines.forEach(path -> {
                             generatePath(content, path);
                         });
-                    LOG.debug("finished generating real dataset");
-                    LOG.debug("starting commit");
+                    LOG.debug("finished");
+                    LOG.debug("- committing");
                 }).commit();
-            LOG.debug("commit finished");
+            LOG.debug("finished");
         }
     }
 }
