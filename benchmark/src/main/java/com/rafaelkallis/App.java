@@ -1,33 +1,31 @@
 package com.rafaelkallis;
 
 import static com.rafaelkallis.shared.TraverseUtils.Accumulate;
-import static com.rafaelkallis.shared.TraverseUtils.LevelOrder;
 import static com.rafaelkallis.shared.Utils.firstNode;
 import static com.rafaelkallis.shared.Utils.initializePropertyIndex;
-import static com.rafaelkallis.shared.Utils.lastNode;
 import static com.rafaelkallis.shared.Utils.mapToPath;
-import static com.rafaelkallis.shared.Utils.memoize;
 import static com.rafaelkallis.shared.Utils.millisSinceNow;
 import static com.rafaelkallis.shared.Utils.setUpCompleteTree;
 import static com.rafaelkallis.shared.Utils.throwException;
-import static com.rafaelkallis.shared.Utils.totalNodes;
 import static com.rafaelkallis.shared.Utils.toggleTwice;
+import static com.rafaelkallis.shared.Utils.totalNodes;
+import static com.rafaelkallis.shared.Utils.generatePath;
 
 import java.io.FileWriter;
 import java.io.IOException;
+import java.net.UnknownHostException;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.text.ParseException;
 import java.time.Instant;
-import java.util.Arrays;
 import java.util.HashSet;
-import java.util.LinkedList;
-import java.util.List;
 import java.util.Set;
 import java.util.Timer;
 import java.util.TimerTask;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 import java.util.function.Supplier;
+import java.util.stream.Stream;
 
 import org.apache.commons.csv.CSVFormat;
 import org.apache.commons.csv.CSVPrinter;
@@ -49,23 +47,22 @@ import org.slf4j.LoggerFactory;
 import com.google.common.hash.HashCode;
 import com.google.common.hash.HashFunction;
 import com.google.common.hash.Hashing;
-import com.mongodb.DB;
 import com.mongodb.MongoClient;
 import com.rafaelkallis.shared.ClusterNode;
 import com.rafaelkallis.shared.Consumer;
-import com.rafaelkallis.shared.Utils;
 
 public class App {
 
     static final Logger LOG = LoggerFactory.getLogger(App.class);
 
-    static final int templateFanout = Integer.getInteger("templateFanout", 2);
-    static final int templateDepth = Integer.getInteger("templateDepth", 20);
-    static final String templateName = System.getProperty("templateName", "oak-template");
+    static final int templateFanoutSynthetic = Integer.getInteger("templateFanoutSynthetic", 2);
+    static final int templateDepthSynthetic = Integer.getInteger("templateDepthSynthetic", 20);
+    static final String templateNameSynthetic = System.getProperty("templateNameSynthetic", "oak-template-synthetic");
+    static final String templateNameReal = System.getProperty("templateNameReal", "oak-template-real");
 
     static final int fanout = Integer.getInteger("fanout", 2);
     static final int depth = Integer.getInteger("depth", 20);
-    static final int skew = Integer.getInteger("skew", 1);
+    static final int workloadSkew = Integer.getInteger("workloadSkew", 1);
     static final int topLevels = Integer.getInteger("topLevels", 1);
     static final int bottomLevels = Integer.getInteger("bottomLevels", 1);
     static final int clusterId = Integer.getInteger("clusterId", 1);
@@ -84,12 +81,11 @@ public class App {
     static final String contentRootPath = System.getProperty("contentRootPath", "/content");
 
     static final Boolean skipInitialize = Boolean.getBoolean("skipInitialize");
-    static final boolean generateDataset = Boolean.getBoolean("generateDataset");
 
-    static final String dataset = System.getProperty("dataset", "synthetic");
-    static final boolean syntheticDataset = dataset.equals("synthetic");
-    static final boolean aemDataset = dataset.equals("aem");
-    static final String outFileName = System.getProperty("outFileName", String.format("output_%d_%s_tau%d_L%d", System.currentTimeMillis() / 1000L, dataset, volatilityThreshold, slidingWindowLength));
+    static final String datasetType = System.getProperty("datasetType", "synthetic");
+    static final boolean syntheticDataset = datasetType.equals("synthetic");
+    static final boolean realDataset = datasetType.equals("real");
+    static final String outFileName = System.getProperty("outFileName", String.format("output_%d_%s_tau%d_L%d", System.currentTimeMillis() / 1000L, datasetType, volatilityThreshold, slidingWindowLength));
     static final boolean QTP = Boolean.getBoolean("QTP");
     static final boolean GC = Boolean.getBoolean("GC");
     static final long GCPeriodicity = Long.getLong("GCPeriodicity", 30 * 1000);
@@ -98,236 +94,164 @@ public class App {
     static final boolean millisLoopMode = loopMode.equals("millis");
     static final boolean tickLoopMode = loopMode.equals("tick");
 
+    static final boolean generateSyntheticDataset = Boolean.getBoolean("generateSyntheticDataset");
+    static final boolean generateRealDataset = Boolean.getBoolean("generateRealDataset");
+    static final String realDatasetFile = System.getProperty("realDatasetFile", "dataset");
+    static final String realWorkloadFile = System.getProperty("realWorkloadFile", "workload");
     static final boolean skipExperiment = Boolean.getBoolean("skipExperiment");
     static final int templateClusterId = Integer.getInteger("templateClusterId", 100);
 
     public static void main(String[] args) throws CommitFailedException, IOException, ParseException {
 
-        LOG.debug("loopMode: {}", loopMode);
-        LOG.debug("fanout: {}", fanout);
-        LOG.debug("depth: {}", depth);
-        LOG.debug("templateFanout: {}", templateFanout);
-        LOG.debug("templateDepth: {}", templateDepth);
-        LOG.debug("templateName: {}", templateName);
-        LOG.debug("topLevels: {}", topLevels);
-        LOG.debug("bottomLevels: {}", bottomLevels);
-        LOG.debug("clusterId: {}", clusterId);
         LOG.debug("volatilityThreshold: {}", volatilityThreshold);
         LOG.debug("slidingWindowLength: {}", slidingWindowLength);
-        LOG.debug("skew: {}", skew);
-        LOG.debug("writesPerTick: {}", writesPerTick);
-        LOG.debug("queriesPerTick: {}", queriesPerTick);
-        LOG.debug("experimentMillis: {}", experimentMillis);
-        LOG.debug("workloadMillis: {}", workloadMillis);
+        LOG.debug("skew: {}", workloadSkew);
         LOG.debug("mongoUri: {}", mongoUri);
         LOG.debug("mongoName: {}", mongoName);
         LOG.debug("contentRootPath: {}", contentRootPath);
         LOG.debug("outFileName: {}", outFileName);
         LOG.debug("skipInitialize: {}", skipInitialize);
-        LOG.debug("dataset: {}", dataset);
+        LOG.debug("datasetType: {}", datasetType);
         LOG.debug("GC: {}", GC);
         LOG.debug("GCPeriodicity: {}", GCPeriodicity);
         LOG.debug("QTP: {}", QTP);
 
-        try (final MongoClient mongoClient = new MongoClient()) {
-            final DB db = mongoClient.getDB(mongoName);
+        if (generateSyntheticDataset) {
+            generateSyntheticDataset();
+        }
 
-            if (generateDataset) {
-                LOG.debug("generating synthetic dataset");
-                try (final DocumentNodeStore nodeStore = new DocumentMK.Builder().setMongoDB(mongoUri, templateName, 16)
-                     .setClusterId(templateClusterId).setVolatilityThreshold(volatilityThreshold)
-                     .setSlidingWindowLength(slidingWindowLength).getNodeStore()) {
-                    ClusterNode clusterNode = new ClusterNode(nodeStore);
-                    clusterNode.transaction(root -> {
-                            LOG.debug("initializing property index");
-                            initializePropertyIndex(root, "pub");
-                            LOG.debug("creating synthetic tree");
-                            Tree r = root.getTree("/");
-                            for (String label : PathUtils.elements(contentRootPath)) {
-                                r = r.addChild(label);
-                            }
-                            setUpCompleteTree(r, templateFanout, templateDepth);
-                        }).commit();
-                }
-            }
+        if (generateRealDataset) {
+            generateRealDataset();
+        }
 
-            if (!skipInitialize) {
-                LOG.debug("dropping {}", mongoName);
-                mongoClient.dropDatabase(mongoName);
+        if (skipExperiment) {
+            return;
+        }
 
-                if (fanout == templateFanout && depth == templateDepth) {
-                    LOG.debug("cloning {} to {}", templateName, mongoName);
-                    final Bson command = BsonDocument.parse(
-                                                            String.format("{ copydb: 1, fromdb: \"%s\", todb: \"%s\"}", templateName, mongoName));
-                    mongoClient.getDatabase("admin").runCommand(command);
-                    LOG.debug("cloning finished");
-                } else {
-                    LOG.debug("creating new database");
-                    ClusterNode.singleTransaction(db, root -> {
-                            LOG.debug("initializing property index");
-                            initializePropertyIndex(root, "pub");
-                            LOG.debug("creating synthetic tree");
-                            Tree tree = root.getTree("/");
-                            for (String child : PathUtils.elements(contentRootPath)) {
-                                tree = tree.addChild(child);
-                            }
-                            setUpCompleteTree(tree, fanout, depth);
-                            LOG.debug("setUp finished");
-                        }).commit();
-                    LOG.debug("setUp committed");
-                }
-            }
+        initialize();
 
-            if (skipExperiment) {
-                return;
-            }
+        try (final DocumentNodeStore nodeStore = new DocumentMK.Builder()
+             .setMongoDB(mongoUri, mongoName, 16)
+             .setClusterId(clusterId)
+             .setVolatilityThreshold(volatilityThreshold)
+             .setSlidingWindowLength(slidingWindowLength)
+             .memoryCacheSize(1 * 1024 * 1024 * 1024)
+             // .setPropertyIndexCleanUpProps("pub")
+             .getNodeStore();
+             final CSVPrinter tickData = new CSVPrinter(new FileWriter(outFileName), CSVFormat.DEFAULT)) {
+            tickData.printRecord("tick", "timestamp", "query_runtime", "trav_index_nodes", "trav_vol_nodes", "trav_unprod_nodes");
 
-            // final String[] topNodes = ClusterNode.singleTransaction(
-            // db,
-            // root -> {
-            // return slice(root.getTree(contentRootPath), 0, topLevels);
+            final ClusterNode clusterNode = new ClusterNode(nodeStore);
+
+            final Timer gcTimer = new Timer();
+
+            final AtomicLong experimentTickCounter = new AtomicLong();
+
+            final Supplier<Long> workloadSupplier = millisAwareWorkload();
+
+            final Supplier<String> writeNodePaths = syntheticDataset
+                ? syntheticWriteNodePaths(workloadSupplier)
+                : realDataset
+                ? realWriteNodePaths(workloadSupplier)
+                : throwException("no write node path supplier");
+
+            final Supplier<String> queryNodePaths = syntheticDataset
+                ? syntheticQueryNodePaths(workloadSupplier)
+                : realDataset
+                ? realQueryNodePaths(workloadSupplier)
+                : throwException("no query node path supplier");
+
+            // final Supplier<Long> millisSinceWarmUpStart = millisSinceNow();
+
+            // if (GC) {
+            // 	gcTimer.schedule(gcTimerTask(nodeStore, "/oak:index/pub/:index/pub", Consumer.Two.noOp()), 0,
+            // 			GCPeriodicity);
             // }
-            // ).commit();
-            //
-            // final String[] bottomNodes = ClusterNode.singleTransaction(
-            // db,
-            // root -> {
-            // return slice(root.getTree(contentRootPath), depth - bottomLevels, depth);
+
+            // LOG.debug("warm-up starting");
+            // if (millisMode) {
+            // 	LOG.debug("warm-up finishing at {}", Instant.now().plusMillis(warmUpMillis));
             // }
-            // ).commit();
-            final DB templateDB = mongoClient.getDB(templateName);
-            try (final DocumentNodeStore nodeStore = new DocumentMK.Builder()
-                 .setMongoDB(mongoUri, mongoName, 16)
-                 .setClusterId(clusterId)
-                 .setVolatilityThreshold(volatilityThreshold)
-                 .setSlidingWindowLength(slidingWindowLength)
-                 .memoryCacheSize(1 * 1024 * 1024 * 1024)
-                 // .setPropertyIndexCleanUpProps("pub")
-                 .getNodeStore();
-                 final CSVPrinter tickData = new CSVPrinter(new FileWriter(outFileName), CSVFormat.DEFAULT)) {
-                tickData.printRecord("tick", "timestamp", "query_runtime", "trav_index_nodes", "trav_vol_nodes", "trav_unprod_nodes");
 
-                final ClusterNode clusterNode = new ClusterNode(nodeStore);
+            // final Consumer.One<Long> warmUpTick = warmUpTickFactory(clusterNode, nodeStore, writeNodePaths,
+            // 		queryNodePaths);
 
-                final Timer gcTimer = new Timer();
+            // final Supplier<Boolean> warmUpLoopCondition = millisMode
+            // 		? () -> millisSinceWarmUpStart.get() < warmUpMillis
+            // 		: tickMode ? () -> warmUpTickCounter.get() < warmUpTicks
+            // 				: throwException("no warmup loop condition provider");
 
-                final Supplier<String[]> aemNodesSupplier = aemNodes(clusterNode);
+            // while (warmUpLoopCondition.get()) {
+            // 	long currentTick = warmUpTickCounter.getAndIncrement();
+            // 	warmUpTick.accept(currentTick);
+            // 	if (tickMode && currentTick % 50 == 0) {
+            // 		LOG.debug("{}/{} ticks complete", currentTick, warmUpTicks);
+            // 	}
+            // }
 
-                final AtomicLong experimentTickCounter = new AtomicLong();
+            // LOG.debug("warm-up finished");
 
-                final Supplier<Long> workloadSupplier = millisAwareWorkload();
+            final Supplier<Long> millisSinceExperimentStart = millisSinceNow();
 
-                final Supplier<String> writeNodePaths = syntheticDataset
-                    ? syntheticTreeWriteNodePaths(workloadSupplier)
-                    : aemDataset
-                    ? aemWriteNodePaths(aemNodesSupplier.get(), workloadSupplier)
-                    : throwException("no write node path supplier");
-
-                final Supplier<String> queryNodePaths = syntheticDataset
-                    ? syntheticTreeQueryNodePaths(workloadSupplier)
-                    : aemDataset
-                    ? aemQueryNodePaths(aemNodesSupplier.get(), workloadSupplier)
-                    : throwException("no query node path supplier");
-
-                // final Supplier<Long> millisSinceWarmUpStart = millisSinceNow();
-
-                // if (GC) {
-                // 	gcTimer.schedule(gcTimerTask(nodeStore, "/oak:index/pub/:index/pub", Consumer.Two.noOp()), 0,
-                // 			GCPeriodicity);
-                // }
-
-                // LOG.debug("warm-up starting");
-                // if (millisMode) {
-                // 	LOG.debug("warm-up finishing at {}", Instant.now().plusMillis(warmUpMillis));
-                // }
-
-                // final Consumer.One<Long> warmUpTick = warmUpTickFactory(clusterNode, nodeStore, writeNodePaths,
-                // 		queryNodePaths);
-
-                // final Supplier<Boolean> warmUpLoopCondition = millisMode
-                // 		? () -> millisSinceWarmUpStart.get() < warmUpMillis
-                // 		: tickMode ? () -> warmUpTickCounter.get() < warmUpTicks
-                // 				: throwException("no warmup loop condition provider");
-
-                // while (warmUpLoopCondition.get()) {
-                // 	long currentTick = warmUpTickCounter.getAndIncrement();
-                // 	warmUpTick.accept(currentTick);
-                // 	if (tickMode && currentTick % 50 == 0) {
-                // 		LOG.debug("{}/{} ticks complete", currentTick, warmUpTicks);
-                // 	}
-                // }
-
-                // LOG.debug("warm-up finished");
-
-                final Supplier<Long> millisSinceExperimentStart = millisSinceNow();
-
-                LOG.debug("experiment starting");
-                if (millisLoopMode) {
-                    LOG.debug("experiment finishing at {}", Instant.now().plusMillis(experimentMillis));
-                }
-
-                // final Consumer.One<String> dataLogger = dataLoggerFactory(out, millisMode
-                // ? millisSinceExperimentStart
-                // : tickMode
-                // ? experimentTickCounter::get
-                // : throwException("no time supplier")
-                // );
-
-                if (GC) {
-                    // gcTimer.cancel();
-                    gcTimer.schedule(
-                                     gcTimerTask(nodeStore, "/oak:index/pub/:index/pub", (Long runtime, Long nCleanedNodes) -> {
-                                             // if (benchmarkGCMillis) {
-                                             // dataLogger.accept(delta.toString());
-                                             // }
-                                             // if (benchmarkGCCleanedNodes) {
-                                             // dataLogger.accept(nCleanedNodes.toString());
-                                             // }
-                                         }), 0, GCPeriodicity);
-                }
-
-                final Consumer.One<Long> experimentTick = experimentTickFactory(
-                                                                                clusterNode,
-                                                                                nodeStore,
-                                                                                writeNodePaths,
-                                                                                queryNodePaths,
-                                                                                millisSinceExperimentStart::get,
-                                                                                (tick,
-                                                                                 timestamp,
-                                                                                 queryRuntime,
-                                                                                 travIndexNodex,
-                                                                                 travVolatileNodes,
-                                                                                 travUnproductiveNodes) -> {
-                                                                                    try {
-                                                                                        tickData.printRecord(
-                                                                                                             tick,
-                                                                                                             timestamp,
-                                                                                                             queryRuntime,
-                                                                                                             travIndexNodex,
-                                                                                                             travVolatileNodes,
-                                                                                                             travUnproductiveNodes);
-                                                                                    } catch (IOException e) {
-                                                                                        LOG.error("io exception", e);
-                                                                                    }
-                                                                                });
-
-                final Supplier<Boolean> experimentLoopCondition = millisLoopMode
-                    ? () -> millisSinceExperimentStart.get() < experimentMillis
-                    : tickLoopMode
-                    ? () -> experimentTickCounter.get() < experimentTicks
-                    : throwException("no experiment loop condition supplier");
-
-                while (experimentLoopCondition.get()) {
-                    final long currentTick = experimentTickCounter.getAndIncrement();
-                    experimentTick.accept(currentTick);
-                    if (tickLoopMode && currentTick % 50 == 0) {
-                        LOG.debug("{}/{} ticks complete", currentTick, experimentTicks);
-                    }
-                }
-
-                LOG.debug("experiment finished");
-                gcTimer.cancel();
+            LOG.debug("experiment starting");
+            if (millisLoopMode) {
+                LOG.debug("experiment finishing at {}", Instant.now().plusMillis(experimentMillis));
             }
+
+            if (GC) {
+                // gcTimer.cancel();
+                gcTimer.schedule(
+                                 gcTimerTask(nodeStore, "/oak:index/pub/:index/pub", (Long runtime, Long nCleanedNodes) -> {
+                                         // if (benchmarkGCMillis) {
+                                         // dataLogger.accept(delta.toString());
+                                         // }
+                                         // if (benchmarkGCCleanedNodes) {
+                                         // dataLogger.accept(nCleanedNodes.toString());
+                                         // }
+                                     }), 0, GCPeriodicity);
+            }
+
+            final Consumer.One<Long> experimentTick = experimentTickFactory(
+                                                                            clusterNode,
+                                                                            nodeStore,
+                                                                            writeNodePaths,
+                                                                            queryNodePaths,
+                                                                            millisSinceExperimentStart::get,
+                                                                            (tick,
+                                                                             timestamp,
+                                                                             queryRuntime,
+                                                                             travIndexNodex,
+                                                                             travVolatileNodes,
+                                                                             travUnproductiveNodes) -> {
+                                                                                try {
+                                                                                    tickData.printRecord(
+                                                                                                         tick,
+                                                                                                         timestamp,
+                                                                                                         queryRuntime,
+                                                                                                         travIndexNodex,
+                                                                                                         travVolatileNodes,
+                                                                                                         travUnproductiveNodes);
+                                                                                } catch (IOException e) {
+                                                                                    LOG.error("io exception", e);
+                                                                                }
+                                                                            });
+
+            final Supplier<Boolean> experimentLoopCondition = millisLoopMode
+                ? () -> millisSinceExperimentStart.get() < experimentMillis
+                : tickLoopMode
+                ? () -> experimentTickCounter.get() < experimentTicks
+                : throwException("no experiment loop condition supplier");
+
+            while (experimentLoopCondition.get()) {
+                final long currentTick = experimentTickCounter.getAndIncrement();
+                experimentTick.accept(currentTick);
+                if (tickLoopMode && currentTick % 50 == 0) {
+                    LOG.debug("{}/{} ticks complete", currentTick, experimentTicks);
+                }
+            }
+
+            LOG.debug("experiment finished");
+            gcTimer.cancel();
         }
     }
 
@@ -348,34 +272,34 @@ public class App {
                                                            final Supplier<Long> experimentMillisSupplier,
                                                            final Consumer.Six<Long, Long, Double, Double, Double, Double> hook
                                                            ) {
-        final AtomicReference<Mean> meanQueryRuntime = new AtomicReference<>(new Mean());
-        final AtomicReference<Mean> meanTraversedIndexNodes = new AtomicReference<>(new Mean());
-        final AtomicReference<Mean> meanTraversedVolatileIndexNodes = new AtomicReference<>(new Mean());
-        final AtomicReference<Mean> meanTraversedUnproductiveIndexNodes = new AtomicReference<>(new Mean());
+        Mean meanQueryRuntime = new Mean();
+        Mean meanTraversedIndexNodes = new Mean();
+        Mean meanTraversedVolatileIndexNodes = new Mean();
+        Mean meanTraversedUnproductiveIndexNodes = new  Mean();
 
         final Consumer.One<String> writeOp = toggleTwice(clusterNode);
 
         final Function<String, Set<String>> queryOp = externalQuery(nodeStore,
                                                                     (queryRuntime, traversedIndexNodes, traversedVolatileNodes, traversedUnproductiveNodes) -> {
-                                                                        meanQueryRuntime.get().increment(queryRuntime);
-                                                                        meanTraversedIndexNodes.get().increment(traversedIndexNodes);
-                                                                        meanTraversedVolatileIndexNodes.get().increment(traversedVolatileNodes);
-                                                                        meanTraversedUnproductiveIndexNodes.get().increment(traversedUnproductiveNodes);
+                                                                        meanQueryRuntime.increment(queryRuntime);
+                                                                        meanTraversedIndexNodes.increment(traversedIndexNodes);
+                                                                        meanTraversedVolatileIndexNodes.increment(traversedVolatileNodes);
+                                                                        meanTraversedUnproductiveIndexNodes.increment(traversedUnproductiveNodes);
                                                                     });
 
         return tickFactory(writeNodePaths, writeOp, queryNodePaths, queryOp, (tick) -> {
                 hook.accept(
                             tick,
                             experimentMillisSupplier.get(),
-                            meanQueryRuntime.get().getResult(),
-                            meanTraversedIndexNodes.get().getResult(),
-                            meanTraversedVolatileIndexNodes.get().getResult(),
-                            meanTraversedUnproductiveIndexNodes.get().getResult()
+                            meanQueryRuntime.getResult(),
+                            meanTraversedIndexNodes.getResult(),
+                            meanTraversedVolatileIndexNodes.getResult(),
+                            meanTraversedUnproductiveIndexNodes.getResult()
                             );
-                meanQueryRuntime.get().clear();
-                meanTraversedIndexNodes.get().clear();
-                meanTraversedVolatileIndexNodes.get().clear();
-                meanTraversedUnproductiveIndexNodes.get().clear();
+                meanQueryRuntime.clear();
+                meanTraversedIndexNodes.clear();
+                meanTraversedVolatileIndexNodes.clear();
+                meanTraversedUnproductiveIndexNodes.clear();
             });
     }
 
@@ -386,17 +310,14 @@ public class App {
                                                  Set<String>> queryOp,
                                                  Consumer.One<Long> hook) {
         return (tick) -> {
-
             // update
             for (int i = 0; i < writesPerTick; i++) {
                 writeOp.accept(writeNodePaths.get());
             }
-
             // query
             for (int i = 0; i < queriesPerTick; i++) {
                 queryOp.apply(queryNodePaths.get());
             }
-
             hook.accept(tick);
         };
     }
@@ -448,8 +369,12 @@ public class App {
 
                            return isUnproductive;
                        });
-            hook.accept(runtime.get(), traversedIndexNodes.get(), traversedVolatileNodes.get(),
-                        traversedUnproductiveNodes.get());
+            hook.accept(
+                        runtime.get(),
+                        traversedIndexNodes.get(),
+                        traversedVolatileNodes.get(),
+                        traversedUnproductiveNodes.get()
+                        );
             return resultSet;
         };
     }
@@ -499,31 +424,18 @@ public class App {
         return () -> 0L;
     }
 
-    public static Supplier<String[]> aemNodes(final ClusterNode o) {
-        return memoize(() -> {
-                final LinkedList<String> list = new LinkedList<>();
-                try {
-                    o.transaction(root -> {
-                            LevelOrder(root.getTree(contentRootPath), node -> list.add(node.getPath()));
-                        }).commit();
-                } catch (CommitFailedException e) {
-                    LOG.error("commit failed", e);
-                }
-                return list.toArray(new String[list.size()]);
-            });
+    public static Supplier<String> realQueryNodePaths(Supplier<Long> workloadSupplier) {
+        String[] paths = { contentRootPath };
+        return pickFromArray(paths, workloadSupplier);
     }
 
-    public static Supplier<String> aemQueryNodePaths(String[] aemNodes, Supplier<Long> workloadSupplier) {
-        return pickFromArray(Arrays.copyOfRange(aemNodes, 0, lastNode(topLevels)), workloadSupplier);
-    }
-
-    public static Supplier<String> aemWriteNodePaths(String[] aemNodes, Supplier<Long> workloadSupplier) {
-        return pickFromArray(Arrays.copyOfRange(aemNodes, firstNode(depth - bottomLevels), lastNode(depth)),
-                             workloadSupplier);
+	public static Supplier<String> realWriteNodePaths(Supplier<Long> workloadSupplier) throws IOException {
+        String[] paths = Files.lines(Paths.get(realWorkloadFile)).toArray(String[]::new);
+        return pickFromArray(paths, workloadSupplier);
     }
 
     public static Supplier<String> pickFromArray(String[] paths, Supplier<Long> workloadSupplier) {
-        IntegerDistribution zipf = new ZipfDistribution(paths.length, 1);
+        IntegerDistribution zipf = new ZipfDistribution(paths.length, workloadSkew);
         HashFunction hashFunction = Hashing.murmur3_32();
 
         return () -> {
@@ -536,9 +448,9 @@ public class App {
         };
     }
 
-    public static Supplier<String> syntheticTreeWriteNodePaths(Supplier<Long> workloadSupplier) {
+    public static Supplier<String> syntheticWriteNodePaths(Supplier<Long> workloadSupplier) {
         final int nBottomNodes = totalNodes(depth - bottomLevels, depth);
-        IntegerDistribution zipf = new ZipfDistribution(nBottomNodes, 1);
+        IntegerDistribution zipf = new ZipfDistribution(nBottomNodes, workloadSkew);
         HashFunction hashFunction = Hashing.murmur3_32();
 
         return () -> {
@@ -551,32 +463,9 @@ public class App {
         };
     }
 
-    // public static Supplier<Function<Integer, String>>
-    // syntheticTreeWriteNodePathsDistributed(Supplier<Long> workloadSupplier) {
-    // final int nBottomNodes = totalNodes(depth - bottomLevels, depth);
-    // IntegerDistribution zipf = new ZipfDistribution(nBottomNodes, 1);
-    // HashFunction hashFunction = Hashing.murmur3_32();
-    //
-    // return () -> {
-    // final long workload = workloadSupplier.get();
-    // final int zipfSample = zipf.sample();
-    // final HashCode hashCode = hashFunction.newHasher()
-    // .putLong(workload)
-    // .putInt(zipfSample)
-    // .hash();
-    // final int hash = Hashing.consistentHash(hashCode, nBottomNodes);
-    //
-    // return (Integer clusterNode) -> {
-    // final int k = linearProber(hash, clusterNode, nClusterNodes, nBottomNodes);
-    // final String relativePath = mapToPath(k);
-    // return PathUtils.concat(contentRootPath, relativePath);
-    // };
-    // };
-    // }
-
-    public static Supplier<String> syntheticTreeQueryNodePaths(Supplier<Long> workloadSupplier) {
+    public static Supplier<String> syntheticQueryNodePaths(Supplier<Long> workloadSupplier) {
         final int nTopNodes = totalNodes(0, topLevels);
-        IntegerDistribution zipf = new ZipfDistribution(nTopNodes, 1);
+        IntegerDistribution zipf = new ZipfDistribution(nTopNodes, workloadSkew);
         HashFunction hashFunction = Hashing.murmur3_32();
 
         return () -> {
@@ -587,5 +476,69 @@ public class App {
             final String relativePath = mapToPath(k);
             return PathUtils.concat(contentRootPath, relativePath);
         };
+    }
+
+    public static void initialize() {
+        final String templateName = syntheticDataset
+            ? templateNameSynthetic
+            : realDataset
+            ? templateNameReal
+            : null;
+
+        try (MongoClient mongoClient = new MongoClient()) {
+            LOG.debug("dropping {}", mongoName);
+            mongoClient.dropDatabase(mongoName);
+            LOG.debug("cloning {} to {}", templateName, mongoName);
+            final Bson command = BsonDocument.parse(String.format("{ copydb: 1, fromdb: \"%s\", todb: \"%s\"}", templateName, mongoName));
+            mongoClient.getDatabase("admin").runCommand(command);
+            LOG.debug("cloning finished");
+        }
+    }
+
+    public static void generateSyntheticDataset() {
+        LOG.debug("generating synthetic dataset");
+        try (final DocumentNodeStore nodeStore = new DocumentMK.Builder()
+             .setMongoDB(mongoUri, templateNameSynthetic, 16)
+             .setClusterId(templateClusterId).setVolatilityThreshold(volatilityThreshold)
+             .setSlidingWindowLength(slidingWindowLength)
+             .getNodeStore()) {
+            ClusterNode clusterNode = new ClusterNode(nodeStore);
+            clusterNode.transaction(root -> {
+                    LOG.debug("initializing property index");
+                    initializePropertyIndex(root, "pub");
+                    LOG.debug("creating synthetic tree");
+                    Tree r = root.getTree("/");
+                    for (String label : PathUtils.elements(contentRootPath)) {
+                        r = r.addChild(label);
+                    }
+                    setUpCompleteTree(r, templateFanoutSynthetic, templateDepthSynthetic);
+                }).commit();
+        } catch (UnknownHostException e) {
+            LOG.error("unknown host exception", e);
+        } catch (CommitFailedException e) {
+            LOG.error("commit failed exception", e);
+        }
+    }
+
+	public static void generateRealDataset() throws IOException, CommitFailedException{
+	       try (Stream<String> lines = Files.lines(Paths.get(realDatasetFile));
+             DocumentNodeStore store = new DocumentMK.Builder()
+             .setMongoDB(mongoUri, templateNameReal, 16)
+             .setClusterId(templateClusterId)
+             .setVolatilityThreshold(volatilityThreshold)
+             .setSlidingWindowLength(slidingWindowLength)
+             .getNodeStore()){
+            ClusterNode clusterNode = new ClusterNode(store);
+            clusterNode.transaction(root -> {
+                    LOG.debug("started generating real dataset");
+				Tree content = generatePath(root.getTree("/"), contentRootPath);
+                    lines.forEach(path -> {
+                            generatePath(content, path);
+                        });
+                    LOG.debug("finished generating real dataset");
+                    LOG.debug("starting commit");
+                }).commit();
+            LOG.debug("commit finished");
+        }
     }
 }

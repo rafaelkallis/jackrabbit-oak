@@ -207,6 +207,14 @@ public class Utils {
         return () -> System.currentTimeMillis() - start;
     }
 
+    public static Tree generatePath(final Tree root, String path){
+        Tree r = root;
+        for(String label: PathUtils.elements(path)){
+            r = r.addChild(label);
+        }
+        return r;
+    }
+
     // public static Function<String, Set<String>> nativeQuery(
     // final ClusterNode o,
     // final BiConsumer<Long, Long> hook

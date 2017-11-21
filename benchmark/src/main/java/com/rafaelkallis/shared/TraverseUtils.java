@@ -125,11 +125,10 @@ public class TraverseUtils {
             BiConsumer<NodeState, String> func
     ) {
         Accumulate(nodeStore, absPath, (NodeState nodeState, String path, Iterable<Void> res) -> {
-            func.accept(nodeState, path);
-            for (Void _ : res) {
-            }
-            return null;
-        });
+                func.accept(nodeState, path);
+                for (@SuppressWarnings("unused") Void ignore : res) {}
+                return null;
+            });
     }
 
     public static void PostOrder(
@@ -138,11 +137,10 @@ public class TraverseUtils {
             BiConsumer<NodeState, String> func
     ) {
         Accumulate(nodeStore, absPath, (NodeState nodeState, String path, Iterable<Void> res) -> {
-            for (Void _ : res) {
-            }
-            func.accept(nodeState, path);
-            return null;
-        });
+                for (@SuppressWarnings("unused") Void ignore : res) {}
+                func.accept(nodeState, path);
+                return null;
+            });
     }
 
     private static <R> R Accumulate(
