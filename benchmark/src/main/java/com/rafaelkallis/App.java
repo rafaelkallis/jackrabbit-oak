@@ -69,7 +69,7 @@ public class App {
     static final int volatilityThreshold = Integer.getInteger("volatilityThreshold", 5);
     static final int slidingWindowLength = Integer.getInteger("slidingWindowLength", 30 * 1000);
 
-    static final int writesPerTick = Integer.getInteger("writesPerTick", 10);
+    static final int updatesPerTick = Integer.getInteger("updatesPerTick", 10);
     static final int queriesPerTick = Integer.getInteger("queriesPerTick", 1);
 
     static final long experimentMillis = Long.getLong("experimentMillis", 5 * 60 * 1000);
@@ -85,7 +85,7 @@ public class App {
     static final String datasetType = System.getProperty("datasetType", "synthetic");
     static final boolean syntheticDataset = datasetType.equals("synthetic");
     static final boolean realDataset = datasetType.equals("real");
-    static final String outFileName = System.getProperty("outFileName", String.format("output_%d_%s_tau%d_L%d", System.currentTimeMillis() / 1000L, datasetType, volatilityThreshold, slidingWindowLength));
+    static final String outFileName = System.getProperty("outFileName", String.format("query_output_%d_%s_tau%d_L%d", System.currentTimeMillis() / 1000L, datasetType, volatilityThreshold, slidingWindowLength));
     static final boolean QTP = Boolean.getBoolean("QTP");
     static final boolean GC = Boolean.getBoolean("GC");
     static final long GCPeriodicity = Long.getLong("GCPeriodicity", 30 * 1000);
@@ -96,8 +96,9 @@ public class App {
 
     static final boolean generateSyntheticDataset = Boolean.getBoolean("generateSyntheticDataset");
     static final boolean generateRealDataset = Boolean.getBoolean("generateRealDataset");
-    static final String realDatasetFile = System.getProperty("realDatasetFile", "dataset");
-    static final String realWorkloadFile = System.getProperty("realWorkloadFile", "workload");
+    static final String realDatasetFile = System.getProperty("realDatasetFile", "real_dataset");
+    static final String realQueryWorkloadFile = System.getProperty("realQueryWorkloadFile", "real_query_workload");
+    static final String realUpdateWorkloadFile = System.getProperty("realUpdateWorkloadFile", "real_update_workload");
     static final boolean skipExperiment = Boolean.getBoolean("skipExperiment");
     static final int templateClusterId = Integer.getInteger("templateClusterId", 100);
 
@@ -149,11 +150,11 @@ public class App {
 
             final Supplier<Long> workloadSupplier = millisAwareWorkload();
 
-            final Supplier<String> writeNodePaths = syntheticDataset
-                ? syntheticWriteNodePaths(workloadSupplier)
+            final Supplier<String> updateNodePaths = syntheticDataset
+                ? syntheticUpdateNodePaths(workloadSupplier)
                 : realDataset
-                ? realWriteNodePaths(workloadSupplier)
-                : throwException("no write node path supplier");
+                ? realUpdateNodePaths(workloadSupplier)
+                : throwException("no update node path supplier");
 
             final Supplier<String> queryNodePaths = syntheticDataset
                 ? syntheticQueryNodePaths(workloadSupplier)
@@ -214,7 +215,7 @@ public class App {
             final Consumer.One<Long> experimentTick = experimentTickFactory(
                                                                             clusterNode,
                                                                             nodeStore,
-                                                                            writeNodePaths,
+                                                                            updateNodePaths,
                                                                             queryNodePaths,
                                                                             millisSinceExperimentStart::get,
                                                                             (tick,
@@ -267,7 +268,7 @@ public class App {
     public static Consumer.One<Long> experimentTickFactory(
                                                            final ClusterNode clusterNode,
                                                            final DocumentNodeStore nodeStore,
-                                                           final Supplier<String> writeNodePaths,
+                                                           final Supplier<String> updateNodePaths,
                                                            final Supplier<String> queryNodePaths,
                                                            final Supplier<Long> experimentMillisSupplier,
                                                            final Consumer.Six<Long, Long, Double, Double, Double, Double> hook
@@ -275,9 +276,9 @@ public class App {
         Mean meanQueryRuntime = new Mean();
         Mean meanTraversedIndexNodes = new Mean();
         Mean meanTraversedVolatileIndexNodes = new Mean();
-        Mean meanTraversedUnproductiveIndexNodes = new  Mean();
+        Mean meanTraversedUnproductiveIndexNodes = new Mean();
 
-        final Consumer.One<String> writeOp = toggleTwice(clusterNode);
+        final Consumer.One<String> updateOp = toggleTwice(clusterNode);
 
         final Function<String, Set<String>> queryOp = externalQuery(nodeStore,
                                                                     (queryRuntime, traversedIndexNodes, traversedVolatileNodes, traversedUnproductiveNodes) -> {
@@ -287,7 +288,7 @@ public class App {
                                                                         meanTraversedUnproductiveIndexNodes.increment(traversedUnproductiveNodes);
                                                                     });
 
-        return tickFactory(writeNodePaths, writeOp, queryNodePaths, queryOp, (tick) -> {
+        return tickFactory(updateNodePaths, updateOp, queryNodePaths, queryOp, (tick) -> {
                 hook.accept(
                             tick,
                             experimentMillisSupplier.get(),
@@ -303,16 +304,16 @@ public class App {
             });
     }
 
-    public static Consumer.One<Long> tickFactory(Supplier<String> writeNodePaths,
-                                                 Consumer.One<String> writeOp,
+    public static Consumer.One<Long> tickFactory(Supplier<String> updateNodePaths,
+                                                 Consumer.One<String> updateOp,
                                                  Supplier<String> queryNodePaths,
                                                  Function<String,
                                                  Set<String>> queryOp,
                                                  Consumer.One<Long> hook) {
         return (tick) -> {
             // update
-            for (int i = 0; i < writesPerTick; i++) {
-                writeOp.accept(writeNodePaths.get());
+            for (int i = 0; i < updatesPerTick; i++) {
+                updateOp.accept(updateNodePaths.get());
             }
             // query
             for (int i = 0; i < queriesPerTick; i++) {
@@ -424,13 +425,13 @@ public class App {
         return () -> 0L;
     }
 
-    public static Supplier<String> realQueryNodePaths(Supplier<Long> workloadSupplier) {
-        String[] paths = { contentRootPath };
+	public static Supplier<String> realQueryNodePaths(Supplier<Long> workloadSupplier) throws IOException {
+        String[] paths = Files.lines(Paths.get(realUpdateWorkloadFile)).toArray(String[]::new);
         return pickFromArray(paths, workloadSupplier);
     }
 
-	public static Supplier<String> realWriteNodePaths(Supplier<Long> workloadSupplier) throws IOException {
-        String[] paths = Files.lines(Paths.get(realWorkloadFile)).toArray(String[]::new);
+	public static Supplier<String> realUpdateNodePaths(Supplier<Long> workloadSupplier) throws IOException {
+        String[] paths = Files.lines(Paths.get(realQueryWorkloadFile)).toArray(String[]::new);
         return pickFromArray(paths, workloadSupplier);
     }
 
@@ -448,7 +449,7 @@ public class App {
         };
     }
 
-    public static Supplier<String> syntheticWriteNodePaths(Supplier<Long> workloadSupplier) {
+    public static Supplier<String> syntheticUpdateNodePaths(Supplier<Long> workloadSupplier) {
         final int nBottomNodes = totalNodes(depth - bottomLevels, depth);
         IntegerDistribution zipf = new ZipfDistribution(nBottomNodes, workloadSkew);
         HashFunction hashFunction = Hashing.murmur3_32();

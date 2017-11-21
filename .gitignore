@@ -10,3 +10,7 @@ oak-run/*.csv
 atlassian-ide-plugin.xml
 .checkstyle
 derby.log
+
+real_dataset
+real_update_workload
+real_query_workload
