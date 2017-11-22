@@ -107,11 +107,6 @@ public class App {
         LOG.debug("volatilityThreshold: {}", volatilityThreshold);
         LOG.debug("slidingWindowLength: {}", slidingWindowLength);
         LOG.debug("skew: {}", workloadSkew);
-        LOG.debug("mongoUri: {}", mongoUri);
-        LOG.debug("mongoName: {}", mongoName);
-        LOG.debug("contentRootPath: {}", contentRootPath);
-        LOG.debug("outFileName: {}", outFileName);
-        LOG.debug("skipInitialize: {}", skipInitialize);
         LOG.debug("datasetType: {}", datasetType);
         LOG.debug("GC: {}", GC);
         LOG.debug("GCPeriodicity: {}", GCPeriodicity);
@@ -503,6 +498,10 @@ public class App {
 
     public static void generateSyntheticDataset() throws CommitFailedException, UnknownHostException {
         LOG.debug("generating synthetic dataset");
+        LOG.debug("- droppping previous template");
+        try (MongoClient mongoClient = new MongoClient()) {
+            mongoClient.dropDatabase(templateNameSynthetic);
+        }
         try (final DocumentNodeStore nodeStore = new DocumentMK.Builder()
              .setMongoDB(mongoUri, templateNameSynthetic, 16)
              .setClusterId(templateClusterId).setVolatilityThreshold(volatilityThreshold)
@@ -512,19 +511,21 @@ public class App {
             clusterNode.transaction(root -> {
                     LOG.debug("- initializing property index");
                     initializePropertyIndex(root, "pub");
-                    LOG.debug("finished");
                     LOG.debug("- generating synthetic dataset");
                     Tree content = generatePath(root.getTree("/"), contentRootPath);
                     setUpCompleteTree(content, fanout, depth);
-                    LOG.debug("finished");
                     LOG.debug("- committing");
                 }).commit();
-            LOG.debug("finished");
         }
     }
 
-	public static void generateRealDataset() throws IOException, CommitFailedException{
-	       try (Stream<String> lines = Files.lines(Paths.get(realDatasetFile));
+    public static void generateRealDataset() throws IOException, CommitFailedException{
+        LOG.debug("generating real dataset");
+        LOG.debug("- droppping previous template");
+        try (MongoClient mongoClient = new MongoClient()) {
+            mongoClient.dropDatabase(templateNameReal);
+        }
+        try (Stream<String> lines = Files.lines(Paths.get(realDatasetFile));
              DocumentNodeStore store = new DocumentMK.Builder()
              .setMongoDB(mongoUri, templateNameReal, 16)
              .setClusterId(templateClusterId)
@@ -540,10 +541,8 @@ public class App {
                     lines.forEach(path -> {
                             generatePath(content, path);
                         });
-                    LOG.debug("finished");
                     LOG.debug("- committing");
                 }).commit();
-            LOG.debug("finished");
         }
     }
 }
