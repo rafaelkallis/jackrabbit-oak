@@ -88,6 +88,8 @@ public class Utils {
                     }).commit();
             } catch (CommitFailedException e) {
                 LOG.error("commit failed", e);
+            } catch (IllegalStateException e) {
+                LOG.error("illegal state exception", path, e);
             }
         };
     }
