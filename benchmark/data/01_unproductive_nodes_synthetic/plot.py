@@ -2,15 +2,21 @@
 
 from matplotlib import use
 use("Agg")
-from matplotlib.pyplot import savefig, plot, xlabel, ylabel, clf, legend
+from matplotlib.pyplot import savefig, plot, xlabel, ylabel, clf, legend, axvline
 import numpy as np
 from csv import reader
 from glob import glob
 from math import floor
 
-filename = max(glob("output_*"))
+def tick_milestones(ticks, timestamps, interval):
+    last_milestone = -1
+    for tick, timestamp in zip(ticks, timestamps):
+        current_milestone = floor(timestamp/interval)
+        if current_milestone > last_milestone:
+            yield tick
+        last_milestone = current_milestone
 
-print(filename)
+filename = max(glob("query_output_*_synthetic_tau5_L30000"))
 
 with open(filename) as f:
     csv_reader = reader(f)
@@ -24,25 +30,14 @@ with open(filename) as f:
     trav_vol = np.array(list(map(float, trav_vol)))
     trav_unprod = np.array(list(map(float, trav_unprod)))
 
-    xlabel("Time [minutes]")
-    ylabel("Query Runtime [ms]")
-    plot(timestamps/60000, query_runtime)
-    savefig("millis_query_runtime.png")
-    clf()
+    milestones = np.array(list(tick_milestones(ticks, timestamps, 60000)))
 
     xlabel("Update Operations [1k]")
-    ylabel("Query Runtime [ms]")
+    ylabel("Avg. Query Runtime [ms]")
     plot(ticks/100, query_runtime)
-    savefig("updates_query_runtime.png")
-    clf()
-
-    xlabel("Time [minutes]")
-    ylabel("Traversed Nodes per Query [1k]")
-    plot(timestamps/60000, trav_index/1000, "C7", label="Total")
-    plot(timestamps/60000, trav_vol/1000, "C0", label="Volatile")
-    plot(timestamps/60000, trav_unprod/1000, "C1", label="Unproductive")
-    legend()
-    savefig("millis_traversed_index_nodes.png")
+    for m in milestones:
+        axvline(x=m)
+    savefig("query_runtime_synthetic.png")
     clf()
 
     xlabel("Update Operations [1k]")
@@ -51,22 +46,18 @@ with open(filename) as f:
     plot(ticks/100, trav_vol/1000, "C0", label="Volatile")
     plot(ticks/100, trav_unprod/1000, "C1", label="Unproductive")
     legend()
-    savefig("updates_traversed_index_nodes.png")
-    clf()
-
-    xlabel("Time [minutes]")
-    ylabel("Node Density")
-    plot(timestamps/60000, trav_vol/trav_index, "C0", label="Volatile")
-    plot(timestamps/60000, trav_unprod/trav_index, "C1", label="Unproductive")
-    legend()
-    savefig("millis_index_node_density")
+    for m in milestones:
+        axvline(x=m)
+    savefig("trav_nodes_synthetic.png")
     clf()
 
     xlabel("Update Operations [1k]")
-    ylabel("Node Density")
+    ylabel("Node Ratio")
     plot(ticks/100, trav_vol/trav_index, "C0", label="Volatile")
     plot(ticks/100, trav_unprod/trav_index, "C1", label="Unproductive")
     legend()
-    savefig("updates_index_node_density")
+    for m in milestones:
+        axvline(x=m)
+    savefig("trav_node_ratio_synthetic.png")
     clf()
 

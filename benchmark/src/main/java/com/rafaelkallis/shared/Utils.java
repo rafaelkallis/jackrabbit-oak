@@ -210,7 +210,11 @@ public class Utils {
     public static Tree generatePath(final Tree root, String path){
         Tree r = root;
         for(String label: PathUtils.elements(path)){
-            r = r.addChild(label);
+            if (r.hasChild(label)){
+                r = r.getChild(label);
+            } else {
+                r = r.addChild(label);
+            }
         }
         return r;
     }
