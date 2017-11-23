@@ -439,9 +439,13 @@ public class App {
         return () -> {
             final long workload = workloadSupplier.get();
             final int zipfSample = zipf.sample();
-            final HashCode hashCode = hashFunction.newHasher().putLong(workload).putInt(zipfSample).hash();
+            final HashCode hashCode = hashFunction
+                .newHasher()
+                .putLong(workload)
+                .putInt(zipfSample)
+                .hash();
             final int k = Hashing.consistentHash(hashCode, paths.length);
-            final String relativePath = paths[k];
+            final String relativePath = PathUtils.relativize("/", paths[k]);
             return PathUtils.concat(contentRootPath, relativePath);
         };
     }
@@ -454,8 +458,13 @@ public class App {
         return () -> {
             final long workload = workloadSupplier.get();
             final int zipfSample = zipf.sample();
-            final HashCode hashCode = hashFunction.newHasher().putLong(workload).putInt(zipfSample).hash();
-            final int k = Hashing.consistentHash(hashCode, nBottomNodes) + firstNode(depth - bottomLevels);
+            final HashCode hashCode = hashFunction
+                .newHasher()
+                .putLong(workload)
+                .putInt(zipfSample)
+                .hash();
+            final int k = Hashing.consistentHash(hashCode, nBottomNodes) +
+                firstNode(depth - bottomLevels);
             final String relativePath = mapToPath(k);
             return PathUtils.concat(contentRootPath, relativePath);
         };
