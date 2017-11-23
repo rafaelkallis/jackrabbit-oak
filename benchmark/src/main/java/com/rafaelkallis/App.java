@@ -120,7 +120,7 @@ public class App {
             generateRealDataset();
         }
 
-        if (skipExperiment) {
+        if (generateSyntheticDataset || generateRealDataset || skipExperiment) {
             return;
         }
 
@@ -441,7 +441,7 @@ public class App {
             final int zipfSample = zipf.sample();
             final HashCode hashCode = hashFunction.newHasher().putLong(workload).putInt(zipfSample).hash();
             final int k = Hashing.consistentHash(hashCode, paths.length);
-            final String relativePath = mapToPath(k);
+            final String relativePath = paths[k];
             return PathUtils.concat(contentRootPath, relativePath);
         };
     }
