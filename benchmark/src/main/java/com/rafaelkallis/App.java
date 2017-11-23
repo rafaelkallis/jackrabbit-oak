@@ -422,15 +422,13 @@ public class App {
 
     public static Supplier<String> realQueryNodePaths(Supplier<Long> workloadSupplier) throws IOException {
         LOG.debug("parsing paths for real dataset query workload");
-        String[] paths = Files.lines(Paths.get(realUpdateWorkloadFile)).toArray(String[]::new);
-        LOG.debug("finished parsing");
+        String[] paths = Files.lines(Paths.get(realQueryWorkloadFile)).toArray(String[]::new);
         return pickFromArray(paths, workloadSupplier);
     }
 
     public static Supplier<String> realUpdateNodePaths(Supplier<Long> workloadSupplier) throws IOException {
         LOG.debug("parsing paths for real dataset update workload");
-        String[] paths = Files.lines(Paths.get(realQueryWorkloadFile)).toArray(String[]::new);
-        LOG.debug("finished parsing");
+        String[] paths = Files.lines(Paths.get(realUpdateWorkloadFile)).toArray(String[]::new);
         return pickFromArray(paths, workloadSupplier);
     }
 
