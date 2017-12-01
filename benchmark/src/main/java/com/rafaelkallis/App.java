@@ -1,5 +1,8 @@
 package com.rafaelkallis;
 
+import static com.google.common.collect.Iterables.filter;
+import static com.google.common.collect.Iterables.transform;
+import static com.rafaelkallis.shared.TraverseUtils.Accumulate;
 import static com.rafaelkallis.shared.TraverseUtils.bottomUp;
 import static com.rafaelkallis.shared.Utils.firstNode;
 import static com.rafaelkallis.shared.Utils.generatePath;
@@ -11,10 +14,9 @@ import static com.rafaelkallis.shared.Utils.setUpCompleteTree;
 import static com.rafaelkallis.shared.Utils.throwException;
 import static com.rafaelkallis.shared.Utils.toggleTwice;
 import static com.rafaelkallis.shared.Utils.totalNodes;
-import static com.google.common.collect.Iterables.transform;
-import static com.google.common.collect.Iterables.filter;
-import static org.apache.jackrabbit.oak.commons.PathUtils.relativize;
+
 import static org.apache.jackrabbit.oak.commons.PathUtils.concat;
+import static org.apache.jackrabbit.oak.commons.PathUtils.relativize;
 
 import java.io.FileWriter;
 import java.io.IOException;
@@ -23,6 +25,8 @@ import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.text.ParseException;
 import java.time.Instant;
+import java.util.LinkedList;
+import java.util.List;
 import java.util.Timer;
 import java.util.TimerTask;
 import java.util.concurrent.atomic.AtomicLong;
@@ -67,7 +71,7 @@ public class App {
     static final int fanout = Integer.getInteger("fanout", 2);
     static final int depth = Integer.getInteger("depth", 20);
     static final int workloadSkew = Integer.getInteger("workloadSkew", 1);
-    static final int topLevels = Integer.getInteger("topLevels", 1);
+    static final int topLevels = Integer.getInteger("topLevels", 5);
     static final int bottomLevels = Integer.getInteger("bottomLevels", 1);
     static final int clusterId = Integer.getInteger("clusterId", 1);
     static final int volatilityThreshold = Integer.getInteger("volatilityThreshold", 5);
@@ -334,10 +338,10 @@ public class App {
      *         paths which 1) are descendants of the provided path and 2) have
      *         property "pub" set to "now"
      */
-    public static Function<String, Iterable<String>> externalQuery(DocumentNodeStore documentNodeStore,
-                                                                   Runnable onNextIndexNode,
-                                                                   Runnable onNextVolatileNode,
-                                                                   Runnable onNextUnproductiveNode) {
+    public static Function<String, Iterable<String>> externalQueryLazy(DocumentNodeStore documentNodeStore,
+                                                                       Runnable onNextIndexNode,
+                                                                       Runnable onNextVolatileNode,
+                                                                       Runnable onNextUnproductiveNode) {
         final String indexRootPath = "/oak:index/pub/:index/now";
         return (String contentPath) -> {
             String targetNodePath = concat(indexRootPath,
@@ -354,20 +358,20 @@ public class App {
                                     new Predicate<Node>() {
                                         @Override
                                         public boolean apply(Node n) {
-                                            boolean matching = n.state.getBoolean("match");
-                                            boolean volatile_ = n.state instanceof DocumentNodeState && ((DocumentNodeState) n.state).isVolatile();
+                                            boolean isMatching = n.state.getBoolean("match");
+                                            boolean isVolatile = n.state instanceof DocumentNodeState && ((DocumentNodeState) n.state).isVolatile();
                                             onNextIndexNode.run();
-                                            if (volatile_) { onNextVolatileNode.run(); }
+                                            if (isVolatile) { onNextVolatileNode.run(); }
                                             if (n.state.getChildNodeCount(1) == 0 &&
-                                                !matching &&
-                                                !volatile_
+                                                !isMatching &&
+                                                !isVolatile
                                                 ) {
                                                 onNextUnproductiveNode.run();
                                                 if (QTP){
                                                     n.state.builder().remove();
                                                 }
                                             }
-                                            return matching;
+                                            return isMatching;
                                         }
                                     }),
                              new com.google.common.base.Function<Node, String>() {
@@ -376,6 +380,42 @@ public class App {
                                      return relativize(indexRootPath, n.path);
                                  }
                              });
+        };
+    }
+
+    public static Function<String, Iterable<String>> externalQuery(DocumentNodeStore documentNodeStore,
+                                                                   Runnable onNextIndexNode,
+                                                                   Runnable onNextVolatileNode,
+                                                                   Runnable onNextUnproductiveNode) {
+        final String parentPath = "/oak:index/pub/:index/now";
+        return (String contentPath) -> {
+            final List<String> resultSet = new LinkedList<>();
+            Accumulate(documentNodeStore, concat(parentPath, relativize("/", contentPath)),
+                       (NodeState node, String path, Iterable<Boolean> accumulator) -> {
+                           final boolean isMatching = node.getBoolean("match");
+                           final boolean isVolatile = node instanceof DocumentNodeState
+                               && ((DocumentNodeState) node).isVolatile();
+                           if (isMatching) {
+                               resultSet.add(relativize(parentPath, path));
+                           }
+                           boolean isUnproductive = !isMatching && !isVolatile;
+                           for (boolean isChildUnproductive : accumulator) {
+                               isUnproductive &= isChildUnproductive;
+                           }
+
+                           if (isUnproductive && QTP) {
+                               node.builder().remove();
+                           }
+                           onNextIndexNode.run();
+                           if (isVolatile) {
+                               onNextVolatileNode.run();
+                           } else if (isUnproductive) {
+                               onNextUnproductiveNode.run();
+                           }
+
+                           return isUnproductive;
+                       });
+            return resultSet;
         };
     }
 
