@@ -3,12 +3,15 @@ package com.rafaelkallis.shared;
 import static com.rafaelkallis.shared.Utils.childNodes;
 import static com.rafaelkallis.shared.Utils.getNode;
 
+import java.util.Deque;
 import java.util.Iterator;
+import java.util.LinkedList;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 
 import org.apache.jackrabbit.oak.api.Tree;
 import org.apache.jackrabbit.oak.commons.PathUtils;
+import org.apache.jackrabbit.oak.spi.state.ChildNodeEntry;
 import org.apache.jackrabbit.oak.spi.state.NodeState;
 import org.apache.jackrabbit.oak.spi.state.NodeStore;
 
@@ -168,5 +171,42 @@ public class TraverseUtils {
                 }
             };
         });
+    }
+
+    public static Iterable<Node> bottomUp(Node root) {
+        return () -> {
+            Deque<Node> s1 = new LinkedList<>();
+            Deque<Node> s2 = new LinkedList<>();
+            s1.push(root);
+            return new Iterator<Node>() {
+
+                @Override
+                public boolean hasNext() {
+                    return s1.size() > 0 || s2.size() > 0;
+                }
+
+                @Override
+                public Node next() {
+                    while (s1.size() > 0 &&
+                           (s2.size() == 0 ||
+                            PathUtils.isAncestor(s2.peek().path, s1.peek().path)
+                            )) {
+                        Node n = s1.pop();
+                        s2.push(n);
+                        for (ChildNodeEntry child: n.state.getChildNodeEntries()) {
+                            s1.push(new Node(
+                                             child.getNodeState(),
+                                             PathUtils.concat(n.path, child.getName())
+                                             ));
+                        }
+                    }
+                    return s2.pop();
+                }
+            };
+        };
+    }
+
+    public static Iterable<Node> bottomUp(NodeState nodeState, String path) {
+        return bottomUp(new Node(nodeState, path));
     }
 }

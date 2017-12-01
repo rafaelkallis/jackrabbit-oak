@@ -221,6 +221,8 @@ public class Utils {
         return r;
     }
 
+    // public static Iterable<Node>
+
     // public static Function<String, Set<String>> nativeQuery(
     // final ClusterNode o,
     // final BiConsumer<Long, Long> hook
@@ -250,5 +252,4 @@ public class Utils {
     // return resultSet;
     // };
     // }
-
 }

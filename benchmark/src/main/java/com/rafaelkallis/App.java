@@ -1,7 +1,9 @@
 package com.rafaelkallis;
 
-import static com.rafaelkallis.shared.TraverseUtils.Accumulate;
+import static com.rafaelkallis.shared.TraverseUtils.bottomUp;
 import static com.rafaelkallis.shared.Utils.firstNode;
+import static com.rafaelkallis.shared.Utils.generatePath;
+import static com.rafaelkallis.shared.Utils.getNode;
 import static com.rafaelkallis.shared.Utils.initializePropertyIndex;
 import static com.rafaelkallis.shared.Utils.mapToPath;
 import static com.rafaelkallis.shared.Utils.millisSinceNow;
@@ -9,7 +11,10 @@ import static com.rafaelkallis.shared.Utils.setUpCompleteTree;
 import static com.rafaelkallis.shared.Utils.throwException;
 import static com.rafaelkallis.shared.Utils.toggleTwice;
 import static com.rafaelkallis.shared.Utils.totalNodes;
-import static com.rafaelkallis.shared.Utils.generatePath;
+import static com.google.common.collect.Iterables.transform;
+import static com.google.common.collect.Iterables.filter;
+import static org.apache.jackrabbit.oak.commons.PathUtils.relativize;
+import static org.apache.jackrabbit.oak.commons.PathUtils.concat;
 
 import java.io.FileWriter;
 import java.io.IOException;
@@ -18,8 +23,6 @@ import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.text.ParseException;
 import java.time.Instant;
-import java.util.HashSet;
-import java.util.Set;
 import java.util.Timer;
 import java.util.TimerTask;
 import java.util.concurrent.atomic.AtomicLong;
@@ -31,10 +34,8 @@ import org.apache.commons.csv.CSVFormat;
 import org.apache.commons.csv.CSVPrinter;
 import org.apache.commons.math3.distribution.IntegerDistribution;
 import org.apache.commons.math3.distribution.ZipfDistribution;
-import org.apache.commons.math3.stat.descriptive.moment.Mean;
 import org.apache.jackrabbit.oak.api.CommitFailedException;
 import org.apache.jackrabbit.oak.api.Tree;
-import org.apache.jackrabbit.oak.commons.PathUtils;
 import org.apache.jackrabbit.oak.plugins.document.DocumentMK;
 import org.apache.jackrabbit.oak.plugins.document.DocumentNodeState;
 import org.apache.jackrabbit.oak.plugins.document.DocumentNodeStore;
@@ -44,12 +45,15 @@ import org.bson.conversions.Bson;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import com.google.common.base.Predicate;
+import com.google.common.collect.Iterables;
 import com.google.common.hash.HashCode;
 import com.google.common.hash.HashFunction;
 import com.google.common.hash.Hashing;
 import com.mongodb.MongoClient;
 import com.rafaelkallis.shared.ClusterNode;
 import com.rafaelkallis.shared.Consumer;
+import com.rafaelkallis.shared.Node;
 
 public class App {
 
@@ -70,7 +74,6 @@ public class App {
     static final int slidingWindowLength = Integer.getInteger("slidingWindowLength", 30 * 1000);
 
     static final int updatesPerTick = Integer.getInteger("updatesPerTick", 10);
-    static final int queriesPerTick = Integer.getInteger("queriesPerTick", 1);
 
     static final long experimentMillis = Long.getLong("experimentMillis", 5 * 60 * 1000);
     static final long workloadMillis = Long.getLong("workloadMillis", 30 * 1000);
@@ -207,30 +210,31 @@ public class App {
                                      }), 0, GCPeriodicity);
             }
 
-            final Consumer.One<Long> experimentTick = experimentTickFactory(
-                                                                            clusterNode,
-                                                                            nodeStore,
-                                                                            updateNodePaths,
-                                                                            queryNodePaths,
-                                                                            millisSinceExperimentStart::get,
-                                                                            (tick,
-                                                                             timestamp,
-                                                                             queryRuntime,
-                                                                             travIndexNodex,
-                                                                             travVolatileNodes,
-                                                                             travUnproductiveNodes) -> {
-                                                                                try {
-                                                                                    tickData.printRecord(
-                                                                                                         tick,
-                                                                                                         timestamp,
-                                                                                                         queryRuntime,
-                                                                                                         travIndexNodex,
-                                                                                                         travVolatileNodes,
-                                                                                                         travUnproductiveNodes);
-                                                                                } catch (IOException e) {
-                                                                                    LOG.error("io exception", e);
-                                                                                }
-                                                                            });
+            final Consumer.One<Long> experimentTick =
+                experimentTickFactory(
+                                      clusterNode,
+                                      nodeStore,
+                                      updateNodePaths,
+                                      queryNodePaths,
+                                      millisSinceExperimentStart::get,
+                                      (tick,
+                                       timestamp,
+                                       queryRuntime,
+                                       travIndexNodex,
+                                       travVolatileNodes,
+                                       travUnproductiveNodes) -> {
+                                          try {
+                                              tickData.printRecord(
+                                                                   tick,
+                                                                   timestamp,
+                                                                   queryRuntime,
+                                                                   travIndexNodex,
+                                                                   travVolatileNodes,
+                                                                   travUnproductiveNodes);
+                                          } catch (IOException e) {
+                                              LOG.error("io exception", e);
+                                          }
+                                      });
 
             final Supplier<Boolean> experimentLoopCondition = millisLoopMode
                 ? () -> millisSinceExperimentStart.get() < experimentMillis
@@ -266,55 +270,55 @@ public class App {
                                                            final Supplier<String> updateNodePaths,
                                                            final Supplier<String> queryNodePaths,
                                                            final Supplier<Long> experimentMillisSupplier,
-                                                           final Consumer.Six<Long, Long, Double, Double, Double, Double> hook
+                                                           final Consumer.Six<Long, Long, Long, Long, Long, Long> hook
                                                            ) {
-        Mean meanQueryRuntime = new Mean();
-        Mean meanTraversedIndexNodes = new Mean();
-        Mean meanTraversedVolatileIndexNodes = new Mean();
-        Mean meanTraversedUnproductiveIndexNodes = new Mean();
+        AtomicLong traversedIndexNodes = new AtomicLong();
+        AtomicLong traversedVolatileIndexNodes = new AtomicLong();
+        AtomicLong traversedUnproductiveIndexNodes = new AtomicLong();
 
         final Consumer.One<String> updateOp = toggleTwice(clusterNode);
 
-        final Function<String, Set<String>> queryOp = externalQuery(nodeStore,
-                                                                    (queryRuntime, traversedIndexNodes, traversedVolatileNodes, traversedUnproductiveNodes) -> {
-                                                                        meanQueryRuntime.increment(queryRuntime);
-                                                                        meanTraversedIndexNodes.increment(traversedIndexNodes);
-                                                                        meanTraversedVolatileIndexNodes.increment(traversedVolatileNodes);
-                                                                        meanTraversedUnproductiveIndexNodes.increment(traversedUnproductiveNodes);
-                                                                    });
+        final Function<String, Iterable<String>> queryOp =
+            externalQuery(nodeStore,
+                          () -> traversedIndexNodes.incrementAndGet(),
+                          () -> traversedVolatileIndexNodes.incrementAndGet(),
+                          () -> traversedUnproductiveIndexNodes.incrementAndGet()
+                          );
 
-        return tickFactory(updateNodePaths, updateOp, queryNodePaths, queryOp, (tick) -> {
+        return tickFactory(updateNodePaths,
+                           updateOp,
+                           queryNodePaths,
+                           queryOp,
+                           (tick, queryRuntime) -> {
                 hook.accept(
                             tick,
                             experimentMillisSupplier.get(),
-                            meanQueryRuntime.getResult(),
-                            meanTraversedIndexNodes.getResult(),
-                            meanTraversedVolatileIndexNodes.getResult(),
-                            meanTraversedUnproductiveIndexNodes.getResult()
+                            queryRuntime,
+                            traversedIndexNodes.get(),
+                            traversedVolatileIndexNodes.get(),
+                            traversedUnproductiveIndexNodes.get()
                             );
-                meanQueryRuntime.clear();
-                meanTraversedIndexNodes.clear();
-                meanTraversedVolatileIndexNodes.clear();
-                meanTraversedUnproductiveIndexNodes.clear();
+                traversedIndexNodes.set(0L);
+                traversedVolatileIndexNodes.set(0L);
+                traversedUnproductiveIndexNodes.set(0L);
             });
     }
 
     public static Consumer.One<Long> tickFactory(Supplier<String> updateNodePaths,
                                                  Consumer.One<String> updateOp,
                                                  Supplier<String> queryNodePaths,
-                                                 Function<String,
-                                                 Set<String>> queryOp,
-                                                 Consumer.One<Long> hook) {
+                                                 Function<String, Iterable<String>> queryOp,
+                                                 Consumer.Two<Long, Long> hook) {
         return (tick) -> {
-            // update
+            // updates 
             for (int i = 0; i < updatesPerTick; i++) {
                 updateOp.accept(updateNodePaths.get());
             }
+
             // query
-            for (int i = 0; i < queriesPerTick; i++) {
-                queryOp.apply(queryNodePaths.get());
-            }
-            hook.accept(tick);
+            Supplier<Long> millisSinceQueryStart = millisSinceNow();
+            for (String res: queryOp.apply(queryNodePaths.get())) {}
+            hook.accept(tick, millisSinceQueryStart.get()); 
         };
     }
 
@@ -330,48 +334,48 @@ public class App {
      *         paths which 1) are descendants of the provided path and 2) have
      *         property "pub" set to "now"
      */
-    public static Function<String, Set<String>> externalQuery(final DocumentNodeStore documentNodeStore,
-                                                              final Consumer.Four<Long, Long, Long, Long> hook) {
-        final String parentPath = "/oak:index/pub/:index/now";
+    public static Function<String, Iterable<String>> externalQuery(DocumentNodeStore documentNodeStore,
+                                                                   Runnable onNextIndexNode,
+                                                                   Runnable onNextVolatileNode,
+                                                                   Runnable onNextUnproductiveNode) {
+        final String indexRootPath = "/oak:index/pub/:index/now";
         return (String contentPath) -> {
-            final Set<String> resultSet = new HashSet<>();
-            final Supplier<Long> runtime = millisSinceNow();
-            final AtomicLong traversedIndexNodes = new AtomicLong();
-            final AtomicLong traversedVolatileNodes = new AtomicLong();
-            final AtomicLong traversedUnproductiveNodes = new AtomicLong();
-            Accumulate(documentNodeStore, PathUtils.concat(parentPath, PathUtils.relativize("/", contentPath)),
-                       (NodeState node, String path, Iterable<Boolean> accumulator) -> {
-                           final boolean isMatching = node.getBoolean("match");
-                           final boolean isVolatile = node instanceof DocumentNodeState
-                               && ((DocumentNodeState) node).isVolatile();
-                           if (isMatching) {
-                               resultSet.add(PathUtils.relativize(parentPath, path));
-                           }
-                           boolean isUnproductive = !isMatching && !isVolatile;
-                           for (boolean isChildUnproductive : accumulator) {
-                               isUnproductive &= isChildUnproductive;
-                           }
+            String targetNodePath = concat(indexRootPath,
+                                                     relativize("/", contentPath));
+            NodeState targetNodeState = getNode(documentNodeStore, targetNodePath);
 
-                           if (isUnproductive && QTP) {
-                               node.builder().remove();
-                           }
-
-                           traversedIndexNodes.getAndIncrement();
-                           if (isVolatile) {
-                               traversedVolatileNodes.getAndIncrement();
-                           } else if (isUnproductive) {
-                               traversedUnproductiveNodes.getAndIncrement();
-                           }
-
-                           return isUnproductive;
-                       });
-            hook.accept(
-                        runtime.get(),
-                        traversedIndexNodes.get(),
-                        traversedVolatileNodes.get(),
-                        traversedUnproductiveNodes.get()
-                        );
-            return resultSet;
+            return transform(
+                             filter(
+                                    bottomUp(
+                                             new Node(
+                                                      targetNodeState,
+                                                      targetNodePath
+                                                      )),
+                                    new Predicate<Node>() {
+                                        @Override
+                                        public boolean apply(Node n) {
+                                            boolean matching = n.state.getBoolean("match");
+                                            boolean volatile_ = n.state instanceof DocumentNodeState && ((DocumentNodeState) n.state).isVolatile();
+                                            onNextIndexNode.run();
+                                            if (volatile_) { onNextVolatileNode.run(); }
+                                            if (n.state.getChildNodeCount(1) == 0 &&
+                                                !matching &&
+                                                !volatile_
+                                                ) {
+                                                onNextUnproductiveNode.run();
+                                                if (QTP){
+                                                    n.state.builder().remove();
+                                                }
+                                            }
+                                            return matching;
+                                        }
+                                    }),
+                             new com.google.common.base.Function<Node, String>() {
+                                 @Override
+                                 public String apply(Node n) {
+                                     return relativize(indexRootPath, n.path);
+                                 }
+                             });
         };
     }
 
@@ -391,22 +395,41 @@ public class App {
             @Override
             public void run() {
                 final Supplier<Long> delta = millisSinceNow();
-                final AtomicLong nCleanedNodes = new AtomicLong();
-                Accumulate(nodeStore, absPath, (NodeState node, String path, Iterable<Boolean> accumulator) -> {
-                        boolean hasChild = false;
-                        boolean isMatching = node.getBoolean("match");
-                        boolean isVolatile = node instanceof DocumentNodeState && ((DocumentNodeState) node).isVolatile();
-                        for (boolean isChildRemoved : accumulator) {
-                            hasChild |= !isChildRemoved;
+                long nCleanedNodes = 0;
+
+                String indexRootPath = "/oak:index/pub/:index/now";
+                Node indexRoot = new Node(getNode(nodeStore, indexRootPath), indexRootPath);
+
+                for (Node unproductiveNode : Iterables.filter(
+                                                              bottomUp(indexRoot),
+                                                              new Predicate<Node>() {
+                        @Override
+                        public boolean apply(Node d) {
+                            return d.state.getChildNodeCount(1) == 0 &&
+                                !d.state.getBoolean("match") &&
+                                (d.state instanceof DocumentNodeState) &&
+                                ((DocumentNodeState) d.state).isVolatile();
                         }
-                        if (!hasChild && !isMatching && !isVolatile) {
-                            nCleanedNodes.getAndIncrement();
-                            node.builder().remove();
-                            return true;
-                        }
-                        return false;
-                    });
-                hook.accept(delta.get(), nCleanedNodes.get());
+                    })) {
+                    nCleanedNodes++;
+                    unproductiveNode.state.builder().remove();
+                }
+
+                // Accumulate(nodeStore, absPath, (NodeState node, String path, Iterable<Boolean> accumulator) -> {
+                //         boolean hasChild = false;
+                //         boolean isMatching = node.getBoolean("match");
+                //         boolean isVolatile = node instanceof DocumentNodeState && ((DocumentNodeState) node).isVolatile();
+                //         for (boolean isChildRemoved : accumulator) {
+                //             hasChild |= !isChildRemoved;
+                //         }
+                //         if (!hasChild && !isMatching && !isVolatile) {
+                //             nCleanedNodes.getAndIncrement();
+                //             node.builder().remove();
+                //             return true;
+                //         }
+                //         return false;
+                //     });
+                hook.accept(delta.get(), nCleanedNodes);
             }
         };
     }
@@ -445,8 +468,8 @@ public class App {
                 .putInt(zipfSample)
                 .hash();
             final int k = Hashing.consistentHash(hashCode, paths.length);
-            final String relativePath = PathUtils.relativize("/", paths[k]);
-            return PathUtils.concat(contentRootPath, relativePath);
+            final String relativePath = relativize("/", paths[k]);
+            return concat(contentRootPath, relativePath);
         };
     }
 
@@ -466,7 +489,7 @@ public class App {
             final int k = Hashing.consistentHash(hashCode, nBottomNodes) +
                 firstNode(depth - bottomLevels);
             final String relativePath = mapToPath(k);
-            return PathUtils.concat(contentRootPath, relativePath);
+            return concat(contentRootPath, relativePath);
         };
     }
 
@@ -481,7 +504,7 @@ public class App {
             final HashCode hashCode = hashFunction.newHasher().putLong(workload).putInt(zipfSample).hash();
             final int k = Hashing.consistentHash(hashCode, nTopNodes);
             final String relativePath = mapToPath(k);
-            return PathUtils.concat(contentRootPath, relativePath);
+            return concat(contentRootPath, relativePath);
         };
     }
 
@@ -544,12 +567,12 @@ public class App {
                     LOG.debug("- initializing property index");
                     initializePropertyIndex(root, "pub");
                     LOG.debug("- generating real dataset");
-                    Tree content = generatePath(root.getTree("/"), contentRootPath);
-                    lines.forEach(path -> {
-                            generatePath(content, path);
-                        });
-                    LOG.debug("- committing");
-                }).commit();
-        }
-    }
+				Tree content = generatePath(root.getTree("/"), contentRootPath);
+				lines.forEach(path -> {
+					generatePath(content, path);
+				});
+				LOG.debug("- committing");
+			}).commit();
+		}
+	}
 }
