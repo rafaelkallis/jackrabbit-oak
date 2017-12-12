@@ -214,9 +214,7 @@ public class App {
                 gcTimer.schedule(new TimerTask(){
                         @Override
                         public void run() {
-                            garbageCollect(clusterNode,(Long runtime, Long nCleanedNodes) -> {
-
-                                });
+                            garbageCollect(clusterNode);
                         }
                     }, 0, GCPeriodicity);
             }
@@ -224,7 +222,6 @@ public class App {
             final Consumer.One<Long> experimentTick =
                 experimentTickFactory(
                                       clusterNode,
-                                      nodeStore,
                                       updateNodePaths,
                                       queryNodePaths,
                                       millisSinceExperimentStart::get,
