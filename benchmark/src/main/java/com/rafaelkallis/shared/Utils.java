@@ -1,14 +1,14 @@
 package com.rafaelkallis.shared;
 
-import org.apache.jackrabbit.oak.api.CommitFailedException;
-import org.apache.jackrabbit.oak.api.Root;
-import org.apache.jackrabbit.oak.api.Tree;
-import org.apache.jackrabbit.oak.api.Type;
-import org.apache.jackrabbit.oak.commons.PathUtils;
-import org.apache.jackrabbit.oak.spi.state.NodeState;
-import org.apache.jackrabbit.oak.spi.state.NodeStore;
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import static com.rafaelkallis.shared.TraverseUtils.LevelOrder;
+import static com.rafaelkallis.shared.TraverseUtils.PreOrder;
+
+import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.INDEX_DEFINITIONS_NAME;
+import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.INDEX_DEFINITIONS_NODE_TYPE;
+import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.PROPERTY_NAMES;
+import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.REINDEX_PROPERTY_NAME;
+import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.TYPE_PROPERTY_NAME;
+import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.UNIQUE_PROPERTY_NAME;
 
 import java.util.ArrayList;
 import java.util.Iterator;
@@ -16,9 +16,20 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 
-import static com.rafaelkallis.shared.TraverseUtils.*;
-
-import static org.apache.jackrabbit.oak.plugins.index.IndexConstants.*;
+import org.apache.jackrabbit.oak.api.CommitFailedException;
+import org.apache.jackrabbit.oak.api.Root;
+import org.apache.jackrabbit.oak.api.Tree;
+import org.apache.jackrabbit.oak.api.Type;
+import org.apache.jackrabbit.oak.commons.PathUtils;
+import org.apache.jackrabbit.oak.plugins.document.Collection;
+import org.apache.jackrabbit.oak.plugins.document.DocumentNodeState;
+import org.apache.jackrabbit.oak.plugins.document.DocumentNodeStore;
+import org.apache.jackrabbit.oak.plugins.document.NodeDocument;
+import org.apache.jackrabbit.oak.plugins.document.Revision;
+import org.apache.jackrabbit.oak.spi.state.NodeState;
+import org.apache.jackrabbit.oak.spi.state.NodeStore;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 public class Utils {
 
@@ -51,12 +62,18 @@ public class Utils {
     ) {
         List<String> list = new ArrayList<>();
         final int rootDepth = PathUtils.getDepth(tree.getPath());
-        LevelOrder(tree, (node) -> {
+        for (Tree node : LevelOrder(tree)){
             final int nodeDepth = PathUtils.getDepth(node.getPath()) - rootDepth;
             if (minDepth <= nodeDepth && nodeDepth < maxDepth) {
                 list.add(node.getPath());
             }
-        });
+        }
+        // LevelOrder(tree, (node) -> {
+        //     final int nodeDepth = PathUtils.getDepth(node.getPath()) - rootDepth;
+        //     if (minDepth <= nodeDepth && nodeDepth < maxDepth) {
+        //         list.add(node.getPath());
+        //     }
+        // });
         return list.toArray(new String[list.size()]);
     }
 
@@ -142,12 +159,12 @@ public class Utils {
         return path.toString();
     }
 
-    public static NodeState getNode(NodeStore nodeStore, String absPath) {
+    public static DocumentNodeState getNode(NodeStore nodeStore, String absPath) {
         NodeState targetNode = nodeStore.getRoot();
         for (String child : PathUtils.elements(absPath)) {
             targetNode = targetNode.getChildNode(child);
         }
-        return targetNode;
+        return (DocumentNodeState) targetNode;
     }
 
     public static Iterable<NodeState> childNodes(final NodeState node) {
@@ -221,35 +238,69 @@ public class Utils {
         return r;
     }
 
-    // public static Iterable<Node>
+    public static boolean conjuct(Iterable<Boolean> iterable) {
+        boolean a = true;
+        for (boolean b: iterable) {
+            a &= b;
+        }
+        return a;
+    }
+
+    public static boolean isVolatile(Tree node, DocumentNodeStore store) {
+        int vol = 0;
+        String key = PathUtils.getDepth(node.getPath()) + ":" + node.getPath();
+        NodeDocument document = store.getDocumentStore().find(Collection.NODES, key);
+        for (Revision r : document.getLocalDeleted().keySet()) {
+            if (!isInSlidingWindow(r, store)) {
+                break;
+            }
+            if (!isVisible(r, store)) {
+                continue;
+            }
+            if (vol++ >= store.getVolatilityThreshold()) {
+                break;
+            }
+        }
+        return vol >= store.getVolatilityThreshold();
+    }
+
+    private static boolean isVisible(Revision r, DocumentNodeStore store) {
+        int clusterId = store.getClusterId();
+        return r.getClusterId() == clusterId
+            || (r.compareRevisionTimeThenClusterId(store.getHeadRevision().getRevision(clusterId)) < 0);
+    }
+
+    private static boolean isInSlidingWindow(Revision r, DocumentNodeStore store) {
+        return System.currentTimeMillis() - store.getSlidingWindowLength() < r.getTimestamp();
+    }
 
     // public static Function<String, Set<String>> nativeQuery(
-    // final ClusterNode o,
-    // final BiConsumer<Long, Long> hook
-    // ) {
-    // return (String path) -> {
-    // final Supplier<Long> delta = millisSinceNow();
-    // final Set<String> resultSet = new HashSet<>();
-    // try {
-    // o.transaction(root -> {
-    // try {
-    // for (ResultRow resultRow : root.getQueryEngine().executeQuery(
-    // path + "/*[@pub='now']",
-    // Query.XPATH,
-    // Collections.emptyMap(),
-    // Collections.emptyMap()
-    // ).getRows()) {
-    // resultSet.add(resultRow.getPath());
-    // }
-    // } catch (ParseException e) {
-    // LOG.error("parse exception", e);
-    // }
-    // }).commit();
-    // } catch (CommitFailedException e) {
-    // LOG.error("commit failed", e);
-    // }
-    // hook.accept(delta.get(), null);
-    // return resultSet;
-    // };
+    //                                                         final ClusterNode o,
+    //                                                         final BiConsumer<Long, Long> hook
+    //                                                         ) {
+    //     return (String path) -> {
+    //         final Supplier<Long> delta = millisSinceNow();
+    //         final Set<String> resultSet = new HashSet<>();
+    //         try {
+    //             o.transaction(root -> {
+    //                     try {
+    //                         for (ResultRow resultRow : root.getQueryEngine().executeQuery(
+    //                                                                                       path + "/*[@pub='now']",
+    //                                                                                       Query.XPATH,
+    //                                                                                       Collections.emptyMap(),
+    //                                                                                       Collections.emptyMap()
+    //                                                                                       ).getRows()) {
+    //                             resultSet.add(resultRow.getPath());
+    //                         }
+    //                     } catch (ParseException e) {
+    //                         LOG.error("parse exception", e);
+    //                     }
+    //                 }).commit();
+    //         } catch (CommitFailedException e) {
+    //             LOG.error("commit failed", e);
+    //         }
+    //         hook.accept(delta.get(), null);
+    //         return resultSet;
+    //     };
     // }
 }

@@ -1,7 +1,5 @@
 package com.rafaelkallis;
 
-import static com.google.common.collect.Iterables.filter;
-import static com.google.common.collect.Iterables.transform;
 import static com.rafaelkallis.shared.TraverseUtils.Accumulate;
 import static com.rafaelkallis.shared.TraverseUtils.bottomUp;
 import static com.rafaelkallis.shared.Utils.firstNode;
@@ -14,6 +12,8 @@ import static com.rafaelkallis.shared.Utils.setUpCompleteTree;
 import static com.rafaelkallis.shared.Utils.throwException;
 import static com.rafaelkallis.shared.Utils.toggleTwice;
 import static com.rafaelkallis.shared.Utils.totalNodes;
+import static com.rafaelkallis.shared.Utils.conjuct;
+import static com.rafaelkallis.shared.Utils.isVolatile;
 
 import static org.apache.jackrabbit.oak.commons.PathUtils.concat;
 import static org.apache.jackrabbit.oak.commons.PathUtils.relativize;
@@ -39,11 +39,12 @@ import org.apache.commons.csv.CSVPrinter;
 import org.apache.commons.math3.distribution.IntegerDistribution;
 import org.apache.commons.math3.distribution.ZipfDistribution;
 import org.apache.jackrabbit.oak.api.CommitFailedException;
+import org.apache.jackrabbit.oak.api.Root;
 import org.apache.jackrabbit.oak.api.Tree;
+import org.apache.jackrabbit.oak.api.Type;
 import org.apache.jackrabbit.oak.plugins.document.DocumentMK;
 import org.apache.jackrabbit.oak.plugins.document.DocumentNodeState;
 import org.apache.jackrabbit.oak.plugins.document.DocumentNodeStore;
-import org.apache.jackrabbit.oak.spi.state.NodeState;
 import org.bson.BsonDocument;
 import org.bson.conversions.Bson;
 import org.slf4j.Logger;
@@ -57,7 +58,6 @@ import com.google.common.hash.Hashing;
 import com.mongodb.MongoClient;
 import com.rafaelkallis.shared.ClusterNode;
 import com.rafaelkallis.shared.Consumer;
-import com.rafaelkallis.shared.Node;
 
 public class App {
 
@@ -71,7 +71,7 @@ public class App {
     static final int fanout = Integer.getInteger("fanout", 2);
     static final int depth = Integer.getInteger("depth", 20);
     static final int workloadSkew = Integer.getInteger("workloadSkew", 1);
-    static final int topLevels = Integer.getInteger("topLevels", 5);
+    static final int topLevels = Integer.getInteger("topLevels", 1);
     static final int bottomLevels = Integer.getInteger("bottomLevels", 1);
     static final int clusterId = Integer.getInteger("clusterId", 1);
     static final int volatilityThreshold = Integer.getInteger("volatilityThreshold", 5);
@@ -92,7 +92,16 @@ public class App {
     static final String datasetType = System.getProperty("datasetType", "synthetic");
     static final boolean syntheticDataset = datasetType.equals("synthetic");
     static final boolean realDataset = datasetType.equals("real");
-    static final String outFileName = System.getProperty("outFileName", String.format("query_output_%d_%s_tau%d_L%d", System.currentTimeMillis() / 1000L, datasetType, volatilityThreshold, slidingWindowLength));
+    static final String queryFileName = String.format("query_output_%d_%s_tau%d_L%d",
+                                                    System.currentTimeMillis() / 1000L,
+                                                    datasetType,
+                                                    volatilityThreshold,
+                                                    slidingWindowLength);
+    static final String gcFileName = String.format("gc_output_%d_%s_tau%d_L%d",
+                                                   System.currentTimeMillis() / 1000L,
+                                                   datasetType,
+                                                   volatilityThreshold,
+                                                   slidingWindowLength);
     static final boolean QTP = Boolean.getBoolean("QTP");
     static final boolean GC = Boolean.getBoolean("GC");
     static final long GCPeriodicity = Long.getLong("GCPeriodicity", 30 * 1000);
@@ -141,7 +150,7 @@ public class App {
              .memoryCacheSize(1 * 1024 * 1024 * 1024)
              // .setPropertyIndexCleanUpProps("pub")
              .getNodeStore();
-             final CSVPrinter tickData = new CSVPrinter(new FileWriter(outFileName), CSVFormat.DEFAULT)) {
+             final CSVPrinter tickData = new CSVPrinter(new FileWriter(queryFileName), CSVFormat.DEFAULT)) {
             tickData.printRecord("tick", "timestamp", "query_runtime", "trav_index_nodes", "trav_vol_nodes", "trav_unprod_nodes");
 
             final ClusterNode clusterNode = new ClusterNode(nodeStore);
@@ -202,16 +211,14 @@ public class App {
             }
 
             if (GC) {
-                // gcTimer.cancel();
-                gcTimer.schedule(
-                                 gcTimerTask(nodeStore, "/oak:index/pub/:index/pub", (Long runtime, Long nCleanedNodes) -> {
-                                         // if (benchmarkGCMillis) {
-                                         // dataLogger.accept(delta.toString());
-                                         // }
-                                         // if (benchmarkGCCleanedNodes) {
-                                         // dataLogger.accept(nCleanedNodes.toString());
-                                         // }
-                                     }), 0, GCPeriodicity);
+                gcTimer.schedule(new TimerTask(){
+                        @Override
+                        public void run() {
+                            garbageCollect(clusterNode,(Long runtime, Long nCleanedNodes) -> {
+
+                                });
+                        }
+                    }, 0, GCPeriodicity);
             }
 
             final Consumer.One<Long> experimentTick =
@@ -270,7 +277,6 @@ public class App {
 
     public static Consumer.One<Long> experimentTickFactory(
                                                            final ClusterNode clusterNode,
-                                                           final DocumentNodeStore nodeStore,
                                                            final Supplier<String> updateNodePaths,
                                                            final Supplier<String> queryNodePaths,
                                                            final Supplier<Long> experimentMillisSupplier,
@@ -283,11 +289,11 @@ public class App {
         final Consumer.One<String> updateOp = toggleTwice(clusterNode);
 
         final Function<String, Iterable<String>> queryOp =
-            externalQuery(nodeStore,
-                          () -> traversedIndexNodes.incrementAndGet(),
-                          () -> traversedVolatileIndexNodes.incrementAndGet(),
-                          () -> traversedUnproductiveIndexNodes.incrementAndGet()
-                          );
+            externalQueryTransaction(clusterNode,
+                                     () -> traversedIndexNodes.incrementAndGet(),
+                                     () -> traversedVolatileIndexNodes.incrementAndGet(),
+                                     () -> traversedUnproductiveIndexNodes.incrementAndGet()
+                                     );
 
         return tickFactory(updateNodePaths,
                            updateOp,
@@ -314,7 +320,7 @@ public class App {
                                                  Function<String, Iterable<String>> queryOp,
                                                  Consumer.Two<Long, Long> hook) {
         return (tick) -> {
-            // updates 
+            // updates
             for (int i = 0; i < updatesPerTick; i++) {
                 updateOp.accept(updateNodePaths.get());
             }
@@ -326,95 +332,69 @@ public class App {
         };
     }
 
-    /**
-     * Runs Query in external mode.
-     *
-     * @param documentNodeStore
-     * @param hook:
-     *            A function which accepts 1) the query execution time as 1st
-     *            parameter and 2) the number of unproductive nodes encountered
-     *            during execution as 2nd parameter
-     * @return A function which accepts a path and returns the set of content node
-     *         paths which 1) are descendants of the provided path and 2) have
-     *         property "pub" set to "now"
-     */
-    public static Function<String, Iterable<String>> externalQueryLazy(DocumentNodeStore documentNodeStore,
-                                                                       Runnable onNextIndexNode,
-                                                                       Runnable onNextVolatileNode,
-                                                                       Runnable onNextUnproductiveNode) {
-        final String indexRootPath = "/oak:index/pub/:index/now";
+    public static Function<String, Iterable<String>> externalQueryTransaction(ClusterNode clusterNode,
+                                                                              Runnable onNextIndexNode,
+                                                                              Runnable onNextVolatileNode,
+                                                                              Runnable onNextUnproductiveNode){
+        DocumentNodeStore store = clusterNode.getNodeStore();
+        final String parentPath = "/oak:index/pub/:index/now";
         return (String contentPath) -> {
-            String targetNodePath = concat(indexRootPath,
-                                                     relativize("/", contentPath));
-            NodeState targetNodeState = getNode(documentNodeStore, targetNodePath);
-
-            return transform(
-                             filter(
-                                    bottomUp(
-                                             new Node(
-                                                      targetNodeState,
-                                                      targetNodePath
-                                                      )),
-                                    new Predicate<Node>() {
-                                        @Override
-                                        public boolean apply(Node n) {
-                                            boolean isMatching = n.state.getBoolean("match");
-                                            boolean isVolatile = n.state instanceof DocumentNodeState && ((DocumentNodeState) n.state).isVolatile();
-                                            onNextIndexNode.run();
-                                            if (isVolatile) { onNextVolatileNode.run(); }
-                                            if (n.state.getChildNodeCount(1) == 0 &&
-                                                !isMatching &&
-                                                !isVolatile
-                                                ) {
-                                                onNextUnproductiveNode.run();
-                                                if (QTP){
-                                                    n.state.builder().remove();
-                                                }
-                                            }
-                                            return isMatching;
-                                        }
-                                    }),
-                             new com.google.common.base.Function<Node, String>() {
-                                 @Override
-                                 public String apply(Node n) {
-                                     return relativize(indexRootPath, n.path);
-                                 }
-                             });
+            final List<String> resultSet = new LinkedList<>();
+            try {
+                clusterNode.transaction((Root r) -> {
+                        Accumulate(r.getTree(concat(parentPath, relativize("/", contentPath))),
+                                   (Tree node, Iterable<Boolean> accumulator) -> {
+                                       boolean isMatching = node.getProperty("match").getValue(Type.BOOLEAN);
+                                       boolean isVolatile = isVolatile(node, clusterNode.getNodeStore());
+                                       onNextIndexNode.run();
+                                       if (isMatching) {
+                                           resultSet.add(relativize(parentPath, node.getPath()));
+                                       }
+                                       boolean isUnproductive = conjuct(accumulator) && !isMatching && !isVolatile;
+                                       if (isUnproductive && QTP) {
+                                           node.remove();
+                                       }
+                                       if (isVolatile) {
+                                           onNextVolatileNode.run();
+                                       } else if (isUnproductive) {
+                                           onNextUnproductiveNode.run();
+                                       }
+                                       return isUnproductive;
+                                   });
+                    }).commit();
+            } catch (CommitFailedException e) {
+                LOG.error("commit failed exception", e);
+            }
+            return resultSet;
         };
     }
 
-    public static Function<String, Iterable<String>> externalQuery(DocumentNodeStore documentNodeStore,
+    public static Function<String, Iterable<String>> externalQuery(DocumentNodeStore store,
                                                                    Runnable onNextIndexNode,
                                                                    Runnable onNextVolatileNode,
                                                                    Runnable onNextUnproductiveNode) {
         final String parentPath = "/oak:index/pub/:index/now";
         return (String contentPath) -> {
             final List<String> resultSet = new LinkedList<>();
-            Accumulate(documentNodeStore, concat(parentPath, relativize("/", contentPath)),
-                       (NodeState node, String path, Iterable<Boolean> accumulator) -> {
-                           final boolean isMatching = node.getBoolean("match");
-                           final boolean isVolatile = node instanceof DocumentNodeState
-                               && ((DocumentNodeState) node).isVolatile();
-                           if (isMatching) {
-                               resultSet.add(relativize(parentPath, path));
-                           }
-                           boolean isUnproductive = !isMatching && !isVolatile;
-                           for (boolean isChildUnproductive : accumulator) {
-                               isUnproductive &= isChildUnproductive;
-                           }
-
-                           if (isUnproductive && QTP) {
-                               node.builder().remove();
-                           }
-                           onNextIndexNode.run();
-                           if (isVolatile) {
-                               onNextVolatileNode.run();
-                           } else if (isUnproductive) {
-                               onNextUnproductiveNode.run();
-                           }
-
-                           return isUnproductive;
-                       });
+            DocumentNodeState root = getNode(store, concat(parentPath, relativize("/", contentPath)));
+            Accumulate(root, (DocumentNodeState node, Iterable<Boolean> accumulator) -> {
+                    final boolean isMatching = node.getBoolean("match");
+                    final boolean isVolatile = node.isVolatile();
+                    if (isMatching) {
+                        resultSet.add(relativize(parentPath, node.getPath()));
+                    }
+                    boolean isUnproductive = conjuct(accumulator) && !isMatching && !isVolatile;
+                    if (isUnproductive && QTP) {
+                        node.builder().remove();
+                    }
+                    onNextIndexNode.run();
+                    if (isVolatile) {
+                        onNextVolatileNode.run();
+                    } else if (isUnproductive) {
+                        onNextUnproductiveNode.run();
+                    }
+                    return isUnproductive;
+                });
             return resultSet;
         };
     }
@@ -430,48 +410,24 @@ public class App {
      *            2nd parameter
      * @return
      */
-    public static TimerTask gcTimerTask(DocumentNodeStore nodeStore, String absPath, Consumer.Two<Long, Long> hook) {
-        return new TimerTask() {
-            @Override
-            public void run() {
-                final Supplier<Long> delta = millisSinceNow();
-                long nCleanedNodes = 0;
+    public static void garbageCollect(ClusterNode clusterNode) {
+        try {
+            clusterNode.transaction((Root root) -> {
+                    for (Tree node : bottomUp(root.getTree("/oak:index/pub/:index/now"))) {
+                            boolean isMatching = node.getProperty("match").getValue(Type.BOOLEAN);
+                            boolean isVolatile = isVolatile(node, clusterNode.getNodeStore());
+                            boolean isUnproductive = !isMatching
+                                && !isVolatile
+                                && node.getChildrenCount(1) == 0;
 
-                String indexRootPath = "/oak:index/pub/:index/now";
-                Node indexRoot = new Node(getNode(nodeStore, indexRootPath), indexRootPath);
-
-                for (Node unproductiveNode : Iterables.filter(
-                                                              bottomUp(indexRoot),
-                                                              new Predicate<Node>() {
-                        @Override
-                        public boolean apply(Node d) {
-                            return d.state.getChildNodeCount(1) == 0 &&
-                                !d.state.getBoolean("match") &&
-                                (d.state instanceof DocumentNodeState) &&
-                                ((DocumentNodeState) d.state).isVolatile();
-                        }
-                    })) {
-                    nCleanedNodes++;
-                    unproductiveNode.state.builder().remove();
-                }
-
-                // Accumulate(nodeStore, absPath, (NodeState node, String path, Iterable<Boolean> accumulator) -> {
-                //         boolean hasChild = false;
-                //         boolean isMatching = node.getBoolean("match");
-                //         boolean isVolatile = node instanceof DocumentNodeState && ((DocumentNodeState) node).isVolatile();
-                //         for (boolean isChildRemoved : accumulator) {
-                //             hasChild |= !isChildRemoved;
-                //         }
-                //         if (!hasChild && !isMatching && !isVolatile) {
-                //             nCleanedNodes.getAndIncrement();
-                //             node.builder().remove();
-                //             return true;
-                //         }
-                //         return false;
-                //     });
-                hook.accept(delta.get(), nCleanedNodes);
-            }
-        };
+                            if (isUnproductive) {
+                                node.remove();
+                            }
+                    }
+                }).commit();
+        } catch (CommitFailedException e) {
+            LOG.error("commit failed exception", e);
+        }
     }
 
     public static Supplier<Long> millisAwareWorkload() {

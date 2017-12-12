@@ -26,11 +26,13 @@ public class ClusterNode {
     private final ContentRepository contentRepository;
     private final int clusterId;
 
+    private DocumentNodeStore nodeStore;
 
     public ClusterNode(
             final DocumentNodeStore nodeStore
     ) {
         this.clusterId = nodeStore.getClusterId();
+        this.nodeStore = nodeStore;
 
         final Oak oak = new Oak(nodeStore)
                 .with(new InitialContent())
@@ -38,6 +40,10 @@ public class ClusterNode {
                 .with(new PropertyIndexEditorProvider());
 
         this.contentRepository = oak.createContentRepository();
+    }
+
+    public DocumentNodeStore getNodeStore() {
+        return nodeStore;
     }
 
     public Commitable<Void> transaction(Consumer<Root> f) {
