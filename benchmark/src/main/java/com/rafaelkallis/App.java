@@ -1,6 +1,7 @@
 package com.rafaelkallis;
 
 import static com.rafaelkallis.shared.TraverseUtils.Accumulate;
+import static com.rafaelkallis.shared.TraverseUtils.PostOrder;
 import static com.rafaelkallis.shared.TraverseUtils.bottomUp;
 import static com.rafaelkallis.shared.Utils.firstNode;
 import static com.rafaelkallis.shared.Utils.generatePath;
@@ -14,6 +15,7 @@ import static com.rafaelkallis.shared.Utils.toggleTwice;
 import static com.rafaelkallis.shared.Utils.totalNodes;
 import static com.rafaelkallis.shared.Utils.conjuct;
 import static com.rafaelkallis.shared.Utils.isVolatile;
+import static com.rafaelkallis.shared.Utils.isMatching;
 
 import static org.apache.jackrabbit.oak.commons.PathUtils.concat;
 import static org.apache.jackrabbit.oak.commons.PathUtils.relativize;
@@ -33,6 +35,9 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.stream.Stream;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ScheduledExecutorService;
 
 import org.apache.commons.csv.CSVFormat;
 import org.apache.commons.csv.CSVPrinter;
@@ -155,7 +160,7 @@ public class App {
 
             final ClusterNode clusterNode = new ClusterNode(nodeStore);
 
-            final Timer gcTimer = new Timer();
+            ScheduledExecutorService service = Executors.newSingleThreadScheduledExecutor();
 
             final AtomicLong experimentTickCounter = new AtomicLong();
 
@@ -172,8 +177,6 @@ public class App {
                 : realDataset
                 ? realQueryNodePaths(workloadSupplier)
                 : throwException("no query node path supplier");
-
-            // final Supplier<Long> millisSinceWarmUpStart = millisSinceNow();
 
             // if (GC) {
             // 	gcTimer.schedule(gcTimerTask(nodeStore, "/oak:index/pub/:index/pub", Consumer.Two.noOp()), 0,
@@ -211,12 +214,11 @@ public class App {
             }
 
             if (GC) {
-                gcTimer.schedule(new TimerTask(){
-                        @Override
-                        public void run() {
-                            garbageCollect(clusterNode);
-                        }
-                    }, 0, GCPeriodicity);
+                LOG.debug("Scheduling GC");
+                service.scheduleAtFixedRate(() -> {
+                        LOG.debug("Running GC");
+                        garbageCollect(clusterNode);
+                    }, 0, GCPeriodicity, TimeUnit.MILLISECONDS);
             }
 
             final Consumer.One<Long> experimentTick =
@@ -259,7 +261,7 @@ public class App {
             }
 
             LOG.debug("experiment finished");
-            gcTimer.cancel();
+            service.shutdown();
         }
     }
 
@@ -339,25 +341,27 @@ public class App {
             final List<String> resultSet = new LinkedList<>();
             try {
                 clusterNode.transaction((Root r) -> {
-                        Accumulate(r.getTree(concat(parentPath, relativize("/", contentPath))),
-                                   (Tree node, Iterable<Boolean> accumulator) -> {
-                                       boolean isMatching = node.getProperty("match").getValue(Type.BOOLEAN);
+                        Tree subtreeRoot = r.getTree(concat(parentPath, relativize("/", contentPath)));
+                        PostOrder(subtreeRoot,
+                                   (Tree node) -> {
+                                       boolean isMatching = isMatching(node);
                                        boolean isVolatile = isVolatile(node, clusterNode.getNodeStore());
                                        onNextIndexNode.run();
                                        if (isMatching) {
                                            resultSet.add(relativize(parentPath, node.getPath()));
                                        }
-                                       boolean isUnproductive = conjuct(accumulator) && !isMatching && !isVolatile;
-                                       if (isUnproductive && QTP) {
-                                           node.remove();
-                                       }
+                                       boolean isUnproductive = node.getChildrenCount(1) == 0 &&
+                                           !isMatching &&
+                                           !isVolatile;
                                        if (isVolatile) {
                                            onNextVolatileNode.run();
-                                       } else if (isUnproductive) {
+                                       }  else if (isUnproductive) {
                                            onNextUnproductiveNode.run();
+                                           if (QTP) {
+                                               node.remove();
+                                           }
                                        }
-                                       return isUnproductive;
-                                   });
+                                  });
                     }).commit();
             } catch (CommitFailedException e) {
                 LOG.error("commit failed exception", e);
@@ -408,19 +412,22 @@ public class App {
      * @return
      */
     public static void garbageCollect(ClusterNode clusterNode) {
+        String rootPath = "/oak:index/pub/:index/now";
         try {
             clusterNode.transaction((Root root) -> {
-                    for (Tree node : bottomUp(root.getTree("/oak:index/pub/:index/now"))) {
-                            boolean isMatching = node.getProperty("match").getValue(Type.BOOLEAN);
-                            boolean isVolatile = isVolatile(node, clusterNode.getNodeStore());
-                            boolean isUnproductive = !isMatching
-                                && !isVolatile
-                                && node.getChildrenCount(1) == 0;
-
-                            if (isUnproductive) {
-                                node.remove();
-                            }
-                    }
+                    PostOrder(root.getTree(rootPath),
+                              (Tree node) -> {
+                                  if (!node.getPath().equals(rootPath)) {
+                                      boolean isMatching = isMatching(node);
+                                      boolean isVolatile = isVolatile(node, clusterNode.getNodeStore());
+                                      boolean isUnproductive = !isMatching
+                                          && !isVolatile
+                                          && node.getChildrenCount(1) == 0;
+                                      if (isUnproductive) {
+                                          node.remove();
+                                      }
+                                  }
+                              });
                 }).commit();
         } catch (CommitFailedException e) {
             LOG.error("commit failed exception", e);

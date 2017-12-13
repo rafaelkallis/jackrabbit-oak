@@ -246,6 +246,11 @@ public class Utils {
         return a;
     }
 
+    public static boolean isMatching(Tree node) {
+        return node.hasProperty("match") &&
+            node.getProperty("match").getValue(Type.BOOLEAN);
+    }
+
     public static boolean isVolatile(Tree node, DocumentNodeStore store) {
         int vol = 0;
         String key = PathUtils.getDepth(node.getPath()) + ":" + node.getPath();
