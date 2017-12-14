@@ -342,15 +342,15 @@ public class App {
             try {
                 clusterNode.transaction((Root r) -> {
                         Tree subtreeRoot = r.getTree(concat(parentPath, relativize("/", contentPath)));
-                        PostOrder(subtreeRoot,
-                                   (Tree node) -> {
+                        Accumulate(subtreeRoot,
+                                   (Tree node, Iterable<Boolean> acc) -> {
                                        boolean isMatching = isMatching(node);
                                        boolean isVolatile = isVolatile(node, clusterNode.getNodeStore());
                                        onNextIndexNode.run();
                                        if (isMatching) {
                                            resultSet.add(relativize(parentPath, node.getPath()));
                                        }
-                                       boolean isUnproductive = node.getChildrenCount(1) == 0 &&
+                                       boolean isUnproductive = conjuct(acc) &&
                                            !isMatching &&
                                            !isVolatile;
                                        if (isVolatile) {
@@ -361,6 +361,8 @@ public class App {
                                                node.remove();
                                            }
                                        }
+
+                                       return isUnproductive;
                                   });
                     }).commit();
             } catch (CommitFailedException e) {
