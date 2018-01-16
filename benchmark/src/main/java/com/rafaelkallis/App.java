@@ -156,7 +156,7 @@ public class App {
              // .setPropertyIndexCleanUpProps("pub")
              .getNodeStore();
              final CSVPrinter tickData = new CSVPrinter(new FileWriter(queryFileName), CSVFormat.DEFAULT)) {
-            tickData.printRecord("tick", "timestamp", "query_runtime", "trav_index_nodes", "trav_vol_nodes", "trav_unprod_nodes");
+            tickData.printRecord("tick", "timestamp", "query_runtime", "has_children_time", "is_matching_time", "is_volatile_time","write_time");
 
             final ClusterNode clusterNode = new ClusterNode(nodeStore);
 
@@ -230,17 +230,20 @@ public class App {
                                       (tick,
                                        timestamp,
                                        queryRuntime,
-                                       travIndexNodex,
-                                       travVolatileNodes,
-                                       travUnproductiveNodes) -> {
+                                       hasChildrenTime,
+                                       isMatchingTime,
+                                       isVolatileTime,
+				       writeTime) -> {
                                           try {
                                               tickData.printRecord(
                                                                    tick,
                                                                    timestamp,
                                                                    queryRuntime,
-                                                                   travIndexNodex,
-                                                                   travVolatileNodes,
-                                                                   travUnproductiveNodes);
+                                                                   hasChildrenTime,
+								   isMatchingTime,
+								   isVolatileTime,
+								   writeTime
+								   );
                                           } catch (IOException e) {
                                               LOG.error("io exception", e);
                                           }
@@ -279,19 +282,27 @@ public class App {
                                                            final Supplier<String> updateNodePaths,
                                                            final Supplier<String> queryNodePaths,
                                                            final Supplier<Long> experimentMillisSupplier,
-                                                           final Consumer.Six<Long, Long, Long, Long, Long, Long> hook
+                                                           final Consumer.Seven<Long, Long, Long, Long, Long, Long, Long> hook
                                                            ) {
         AtomicLong traversedIndexNodes = new AtomicLong();
         AtomicLong traversedVolatileIndexNodes = new AtomicLong();
         AtomicLong traversedUnproductiveIndexNodes = new AtomicLong();
 
+	AtomicLong hasChildrenTime = new AtomicLong();
+	AtomicLong isMatchingTime = new AtomicLong();
+	AtomicLong isVolatileTime = new AtomicLong();
+	AtomicLong writeTime = new AtomicLong();
+
         final Consumer.One<String> updateOp = toggleTwice(clusterNode);
 
         final Function<String, Iterable<String>> queryOp =
             externalQueryTransaction(clusterNode,
-                                     () -> traversedIndexNodes.incrementAndGet(),
-                                     () -> traversedVolatileIndexNodes.incrementAndGet(),
-                                     () -> traversedUnproductiveIndexNodes.incrementAndGet()
+			    (a,b,c,d) -> {
+				    hasChildrenTime.set(a);
+				    isMatchingTime.set(b);
+				    isVolatileTime.set(c);
+				    writeTime.set(d);
+	    }
                                      );
 
         return tickFactory(updateNodePaths,
@@ -303,13 +314,20 @@ public class App {
                             tick,
                             experimentMillisSupplier.get(),
                             queryRuntime,
-                            traversedIndexNodes.get(),
-                            traversedVolatileIndexNodes.get(),
-                            traversedUnproductiveIndexNodes.get()
+			    hasChildrenTime.get(),
+			    isMatchingTime.get(),
+			    isVolatileTime.get(),
+			    writeTime.get()
                             );
+
                 traversedIndexNodes.set(0L);
                 traversedVolatileIndexNodes.set(0L);
                 traversedUnproductiveIndexNodes.set(0L);
+
+		hasChildrenTime.set(0L);
+		isMatchingTime.set(0L);
+		isVolatileTime.set(0L);
+		writeTime.set(0L);
             });
     }
 
@@ -332,39 +350,51 @@ public class App {
     }
 
     public static Function<String, Iterable<String>> externalQueryTransaction(ClusterNode clusterNode,
-                                                                              Runnable onNextIndexNode,
-                                                                              Runnable onNextVolatileNode,
-                                                                              Runnable onNextUnproductiveNode){
+                                                                              Consumer.Four<Long,Long,Long,Long> dataConsumer){
         DocumentNodeStore store = clusterNode.getNodeStore();
         final String parentPath = "/oak:index/pub/:index/now";
         return (String contentPath) -> {
             final List<String> resultSet = new LinkedList<>();
+	    AtomicLong totalHasChildrenTime = new AtomicLong();
+	    AtomicLong totalIsMatchingTime = new AtomicLong();
+	    AtomicLong totalIsVolatileTime = new AtomicLong();
+	    AtomicLong totalWriteTime = new AtomicLong();
             try {
+                 AtomicLong commitTime = new AtomicLong();
                 clusterNode.transaction((Root r) -> {
                         Tree subtreeRoot = r.getTree(concat(parentPath, relativize("/", contentPath)));
-                        Accumulate(subtreeRoot,
-                                   (Tree node, Iterable<Boolean> acc) -> {
-                                       boolean isMatching = isMatching(node);
-                                       boolean isVolatile = isVolatile(node, clusterNode.getNodeStore());
-                                       onNextIndexNode.run();
-                                       if (isMatching) {
-                                           resultSet.add(relativize(parentPath, node.getPath()));
-                                       }
-                                       boolean isUnproductive = conjuct(acc) &&
-                                           !isMatching &&
-                                           !isVolatile;
-                                       if (isVolatile) {
-                                           onNextVolatileNode.run();
-                                       }  else if (isUnproductive) {
-                                           onNextUnproductiveNode.run();
-                                           if (QTP) {
-                                               node.remove();
-                                           }
-                                       }
+			PostOrder(subtreeRoot,
+                                   (Tree node) -> {
+				       long hasChildrenTime = System.nanoTime();
+				       boolean hasChildren = node.getChildrenCount(1) > 0;
+				       totalHasChildrenTime.addAndGet(System.nanoTime() - hasChildrenTime);
 
-                                       return isUnproductive;
-                                  });
+				       long isMatchingTime = System.nanoTime();
+                                       boolean isMatching = isMatching(node);
+				       totalIsMatchingTime.addAndGet(System.nanoTime() - isMatchingTime);
+
+
+				       if (!hasChildren && !isMatching) {
+					   long isVolatileTime = System.nanoTime();
+                                           boolean isVolatile = isVolatile(node, clusterNode.getNodeStore());
+					   totalIsVolatileTime.addAndGet(System.nanoTime() - isVolatileTime);
+					   if (!isVolatile && QTP) {
+					       long writeTime = System.nanoTime();
+					       node.remove();
+					       totalWriteTime.addAndGet(System.nanoTime() - writeTime);
+					   } 
+				       }
+				       
+			});
+			commitTime.set(System.nanoTime());
                     }).commit();
+		    totalWriteTime.addAndGet(System.nanoTime() - commitTime.get());
+		    dataConsumer.accept(
+				    totalHasChildrenTime.get(),
+				    totalIsMatchingTime.get(),
+				    totalIsVolatileTime.get(),
+				    totalWriteTime.get()
+				    );
             } catch (CommitFailedException e) {
                 LOG.error("commit failed exception", e);
             }
